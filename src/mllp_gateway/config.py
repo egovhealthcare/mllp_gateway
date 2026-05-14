@@ -164,7 +164,12 @@ class Config:
     disable_auth: bool = False
     auto_update: bool = True
     update_check_interval: int = 6
+    update_channel: str = "stable"
     github_repo: str = "egovhealthcare/mllp_gateway"
+
+    @property
+    def include_prereleases(self) -> bool:
+        return self.update_channel != "stable"
 
 
 def load_config() -> Config:
@@ -202,5 +207,6 @@ def load_config() -> Config:
         update_check_interval=updates.get(
             "update_check_interval", updates.get("check_interval_hours", 6)
         ),
+        update_channel=updates.get("update_channel", "stable"),
         github_repo=updates.get("github_repo", "egovhealthcare/mllp_gateway"),
     )

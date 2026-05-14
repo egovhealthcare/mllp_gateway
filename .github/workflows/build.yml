@@ -34,6 +34,14 @@ jobs:
           pip install -e .
           pip install pyinstaller
 
+      - name: Set version from release tag
+        if: github.event_name == 'release'
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          sed -i.bak "s/^__version__ = .*/__version__ = \"${VERSION}\"/" src/mllp_gateway/__init__.py
+          rm -f src/mllp_gateway/__init__.py.bak
+
       - name: Build binary
         run: pyinstaller mllp_gateway.spec --noconfirm
 
@@ -72,3 +80,4 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           files: artifacts/*
+          prerelease: ${{ github.event.release.prerelease }}

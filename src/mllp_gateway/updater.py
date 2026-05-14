@@ -6,17 +6,22 @@ import asyncio
 import logging
 import os
 import platform
+import re
 import stat
 import sys
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import aiohttp
 
 from mllp_gateway import __version__
 from mllp_gateway.process import is_frozen, restart_process
+
+if TYPE_CHECKING:
+    from mllp_gateway.config import Config
 
 __all__ = [
     "UpdateInfo",
@@ -30,18 +35,26 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
+# PEP 440 pre-release ordering: a (alpha) < b (beta) < rc < stable
+_PRE_ORDER = {"a": 0, "b": 1, "rc": 2}
+_STABLE = 99
 
-def _parse_version(tag: str) -> tuple[int, int, int]:
-    """Parse a semver tag like ``v1.2.3`` into a comparable 3-tuple."""
-    tag = tag.lstrip("v")
-    parts = tag.split(".")
-    if len(parts) != 3:
-        raise ValueError(f"Invalid version tag: {tag!r}")
-    return int(parts[0]), int(parts[1]), int(parts[2])
-
+_VERSION_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:(a|b|rc)(\d+))?$")
 
 _OS_MAP = {"linux": "linux", "darwin": "darwin", "win32": "windows"}
 _ARCH_MAP = {"x86_64": "amd64", "amd64": "amd64", "arm64": "arm64", "aarch64": "arm64"}
+
+
+def _parse_version(tag: str) -> tuple[int, int, int, int, int]:
+    """Parse a PEP 440 version like ``1.2.3`` or ``1.2.3a1`` into a
+    comparable 5-tuple. Stable releases sort higher than pre-releases."""
+    m = _VERSION_RE.match(tag.lstrip("v"))
+    if not m:
+        raise ValueError(f"Invalid version tag: {tag!r}")
+    major, minor, patch = int(m[1]), int(m[2]), int(m[3])
+    if m[4] is None:
+        return (major, minor, patch, _STABLE, 0)
+    return (major, minor, patch, _PRE_ORDER[m[4]], int(m[5]))
 
 
 def _get_asset_name() -> str:
@@ -74,13 +87,13 @@ class UpdateInfo:
     github_repo: str
 
 
-async def check_for_update(github_repo: str) -> UpdateInfo | None:
+async def check_for_update(config: Config) -> UpdateInfo | None:
+    """Check GitHub for a newer release. Includes pre-releases when
+    ``config.include_prereleases`` is set."""
     try:
         current = _parse_version(__version__)
     except ValueError:
-        logger.warning(
-            "Cannot parse current version %r, skipping update check", __version__
-        )
+        logger.warning("Cannot parse current version %r, skipping update check", __version__)
         return None
 
     try:
@@ -89,7 +102,12 @@ async def check_for_update(github_repo: str) -> UpdateInfo | None:
         logger.warning("%s", exc)
         return None
 
-    url = f"https://api.github.com/repos/{github_repo}/releases/latest"
+    repo = config.github_repo
+    if config.include_prereleases:
+        url = f"https://api.github.com/repos/{repo}/releases?per_page=20"
+    else:
+        url = f"https://api.github.com/repos/{repo}/releases/latest"
+
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(
@@ -106,34 +124,37 @@ async def check_for_update(github_repo: str) -> UpdateInfo | None:
         logger.debug("Update check failed: %s", exc)
         return None
 
-    tag = data.get("tag_name", "")
-    try:
-        latest = _parse_version(tag)
-    except ValueError:
-        logger.debug("Cannot parse release tag %r", tag)
-        return None
+    releases = data if config.include_prereleases else [data]
 
-    if latest <= current:
-        return None
+    for rel in releases:
+        if rel.get("draft"):
+            continue
+        tag = rel.get("tag_name", "")
+        try:
+            ver = _parse_version(tag)
+        except ValueError:
+            continue
+        if ver <= current:
+            continue
 
-    download_url = ""
-    for asset in data.get("assets", []):
-        if asset.get("name") == asset_name:
-            download_url = asset.get("browser_download_url", "")
-            break
+        download_url = ""
+        for asset in rel.get("assets", []):
+            if asset.get("name") == asset_name:
+                download_url = asset.get("browser_download_url", "")
+                break
+        if not download_url:
+            continue
 
-    if not download_url:
-        logger.debug("No asset %r in release %s", asset_name, tag)
-        return None
+        return UpdateInfo(
+            version=tag.lstrip("v"),
+            download_url=download_url,
+            asset_name=asset_name,
+            is_breaking=(ver[0] != current[0]),
+            release_notes=rel.get("body", ""),
+            github_repo=repo,
+        )
 
-    return UpdateInfo(
-        version=tag.lstrip("v"),
-        download_url=download_url,
-        asset_name=asset_name,
-        is_breaking=(latest[0] != current[0]),
-        release_notes=data.get("body", ""),
-        github_repo=github_repo,
-    )
+    return None
 
 
 async def download_and_apply(info: UpdateInfo) -> bool:
@@ -200,10 +221,9 @@ async def download_and_apply(info: UpdateInfo) -> bool:
 
 
 async def periodic_update_check(
+    config: Config,
     stop_event: asyncio.Event,
-    github_repo: str,
-    interval_hours: int = 6,
-    auto_apply: bool = True,
+    *,
     on_update_available: Callable[[UpdateInfo], None] | None = None,
 ) -> None:
     # Clean up leftover .old binary from previous Windows update
@@ -223,7 +243,7 @@ async def periodic_update_check(
         pass
 
     while not stop_event.is_set():
-        info = await check_for_update(github_repo)
+        info = await check_for_update(config)
 
         if info is not None:
             if on_update_available:
@@ -235,9 +255,9 @@ async def periodic_update_check(
                     "Run 'mllp-gateway update --force' or download from https://github.com/%s/releases",
                     info.version,
                     __version__,
-                    github_repo,
+                    config.github_repo,
                 )
-            elif auto_apply:
+            elif config.auto_update:
                 if await download_and_apply(info):
                     logger.info("Binary replaced, triggering restart")
                     stop_event.set()
@@ -248,15 +268,17 @@ async def periodic_update_check(
                 )
 
         try:
-            await asyncio.wait_for(stop_event.wait(), timeout=interval_hours * 3600)
+            await asyncio.wait_for(
+                stop_event.wait(), timeout=config.update_check_interval * 3600
+            )
             return
         except asyncio.TimeoutError:
             pass
 
 
-def cmd_check_update(config: "Config") -> None:
+def cmd_check_update(config: Config) -> None:
     """CLI handler: print whether an update is available."""
-    info = asyncio.run(check_for_update(config.github_repo))
+    info = asyncio.run(check_for_update(config))
     if info is None:
         print(f"v{__version__} is up to date.")
         return
@@ -270,9 +292,9 @@ def cmd_check_update(config: "Config") -> None:
         print(f"\nDownload from https://github.com/{config.github_repo}/releases")
 
 
-def cmd_update(config: "Config", *, force: bool = False) -> None:
+def cmd_update(config: Config, *, force: bool = False) -> None:
     """CLI handler: download and apply an update."""
-    info = asyncio.run(check_for_update(config.github_repo))
+    info = asyncio.run(check_for_update(config))
     if info is None:
         print(f"v{__version__} is up to date.")
         return
@@ -300,9 +322,9 @@ def cmd_update(config: "Config", *, force: bool = False) -> None:
         sys.exit(1)
 
 
-def auto_update_and_restart(config: "Config") -> None:
+def auto_update_and_restart(config: Config) -> None:
     """Check for a non-breaking update, apply it, and restart the process."""
-    info = asyncio.run(check_for_update(config.github_repo))
+    info = asyncio.run(check_for_update(config))
     if info and not info.is_breaking and asyncio.run(download_and_apply(info)):
         logger.info("Updated to v%s — restarting with new binary", info.version)
         restart_process()

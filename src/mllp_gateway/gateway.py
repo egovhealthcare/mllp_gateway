@@ -156,11 +156,9 @@ async def run_gateway(
     tasks = [
         asyncio.create_task(
             periodic_update_check(
+                config,
                 stop_event,
-                interval_hours=config.update_check_interval,
-                auto_apply=config.auto_update,
                 on_update_available=on_update_available,
-                github_repo=config.github_repo,
             )
         ),
         asyncio.create_task(_periodic_purge(stop_event, store, config.retention_days)),
