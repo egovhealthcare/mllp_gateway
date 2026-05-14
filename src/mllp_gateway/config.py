@@ -128,15 +128,10 @@ def _load_private_key_pem() -> bytes:
     if KEY_FILE.exists():
         return KEY_FILE.read_bytes()
 
-    from cryptography.hazmat.primitives.asymmetric import rsa
-    from cryptography.hazmat.primitives.serialization import (
-        Encoding,
-        NoEncryption,
-        PrivateFormat,
-    )
+    from joserfc.jwk import RSAKey
 
-    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    pem = private_key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption())
+    key = RSAKey.generate_key(2048)
+    pem = key.as_pem(private=True)
     APP_DIR.mkdir(parents=True, exist_ok=True)
     KEY_FILE.write_bytes(pem)
     try:
