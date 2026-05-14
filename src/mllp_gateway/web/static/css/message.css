@@ -1,0 +1,192 @@
+/* ===================================================================
+   Message detail page styles
+   =================================================================== */
+
+.msg-detail-header h1 {
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: 0.75rem;
+}
+.msg-id {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+.meta-bar {
+  display: flex;
+  align-items: center;
+  gap: 1.25rem;
+  flex-wrap: wrap;
+  padding: 0.75rem 1rem;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 1.5rem;
+}
+.meta-item {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+}
+.meta-item svg { color: var(--text-muted); }
+
+/* --- Detail sections --- */
+.detail-section {
+  margin-bottom: 1.5rem;
+}
+.detail-section h2 {
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+  margin-bottom: 0.6rem;
+}
+.section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.6rem;
+}
+.section-header h2 { margin-bottom: 0; }
+
+pre {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  padding: 1rem 1.25rem;
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  line-height: 1.6;
+}
+
+.copy-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  padding: 0.3rem 0.6rem;
+  border-radius: var(--radius-sm);
+  font-size: 0.72rem;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.copy-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  border-color: var(--border-bright);
+}
+
+/* --- Parsed HL7 segments --- */
+.parsed-segment {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 0.5rem;
+  overflow: hidden;
+}
+.seg-header {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.55rem 1rem;
+  cursor: pointer;
+  user-select: none;
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  line-height: 1.5;
+  flex-wrap: nowrap;
+  transition: background 0.12s;
+}
+.seg-header:hover { background: var(--bg-hover); }
+.seg-type {
+  font-weight: 700;
+  color: var(--accent-blue);
+  flex-shrink: 0;
+}
+.seg-desc {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.seg-raw {
+  color: var(--text-secondary);
+  word-break: break-all;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex: 1;
+}
+.seg-raw .field-span { cursor: default; padding: 1px 0; border-radius: 2px; }
+.seg-raw .field-span:hover { background: var(--bg-hover); }
+.seg-raw .sep { color: var(--text-muted); }
+.seg-toggle {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  transition: transform 0.15s;
+  flex-shrink: 0;
+}
+.seg-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-shrink: 0;
+}
+.parsed-segment.expanded .seg-toggle { transform: rotate(90deg); }
+.seg-body {
+  display: none;
+  border-top: 1px solid var(--border);
+}
+.parsed-segment.expanded .seg-body { display: block; }
+.seg-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+.seg-table th {
+  text-align: left;
+  padding: 0.45rem 0.8rem;
+  background: var(--bg-base);
+  color: var(--text-muted);
+  font-weight: 600;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.seg-table td {
+  padding: 0.4rem 0.8rem;
+  border-top: 1px solid var(--border);
+  vertical-align: top;
+}
+.seg-table tr:hover td { background: var(--bg-hover); }
+.seg-table .field-name { color: var(--accent-blue); white-space: nowrap; }
+.seg-table .field-desc { color: var(--text-secondary); }
+.seg-table .field-val {
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+  word-break: break-all;
+}
+.tooltip-wrap { position: relative; display: inline; }
+.tooltip-wrap:hover .tooltip-text { display: block; }
+.tooltip-text {
+  display: none;
+  position: fixed;
+  background: var(--bg-base);
+  border: 1px solid var(--border-bright);
+  color: var(--text-primary);
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.7rem;
+  white-space: nowrap;
+  z-index: 1000;
+  pointer-events: none;
+}

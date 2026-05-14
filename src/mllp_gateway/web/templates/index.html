@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard — MLLP Gateway{% endblock %}
+
+{% block head %}
+<link rel="stylesheet" href="/static/css/index.css">
+{% endblock %}
+
+{% block content %}
+<!-- Stats row -->
+<div class="stats-row">
+  <div class="stat-card">
+    <div class="stat-value" id="statReceived">—</div>
+    <div class="stat-label">Received</div>
+    <div class="stat-accent accent-cyan"></div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-value" id="statForwarded">—</div>
+    <div class="stat-label">Forwarded</div>
+    <div class="stat-accent accent-green"></div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-value" id="statSent">—</div>
+    <div class="stat-label">Sent</div>
+    <div class="stat-accent accent-purple"></div>
+  </div>
+  <div class="stat-card">
+    <div class="stat-value" id="statDevices">—</div>
+    <div class="stat-label">Devices</div>
+    <div class="stat-accent accent-amber"></div>
+  </div>
+</div>
+
+<!-- Connected devices -->
+<section class="panel" id="devicesPanel">
+  <div class="panel-header">
+    <h2>Connected Devices</h2>
+    <div class="device-legend">
+      <span><span class="legend-dot dot-oru"></span>ORU</span>
+      <span><span class="legend-dot dot-orm"></span>ORM</span>
+    </div>
+  </div>
+  <div class="panel-body" id="devices">
+    <div class="empty-state">No devices connected</div>
+  </div>
+</section>
+
+<!-- Send message card -->
+<section class="panel send-panel" id="sendPanel">
+  <div class="panel-header send-toggle" id="sendToggle">
+    <div class="send-toggle-left">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m22 2-7 20-4-9-9-4z"/><path d="m22 2-10 10"/></svg>
+      <h2>Send HL7 Message</h2>
+    </div>
+    <svg class="chevron" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+  </div>
+  <form id="sendForm" class="send-body">
+    <div class="form-row">
+      <div class="form-group flex-1">
+        <label for="sendDevice">Device</label>
+        <select id="sendDevice">
+          <option value="">— Manual IP —</option>
+        </select>
+        <div class="field-hint">Connected devices auto-populate. Select "Manual IP" to enter a custom address.</div>
+      </div>
+      <div class="form-group flex-1">
+        <label for="sendMode">Send Mode</label>
+        <select id="sendMode">
+          <option value="client">Client (new connection to device)</option>
+          <option value="shared">Shared (existing ORU connection)</option>
+          <option value="server">Server (existing ORM connection)</option>
+        </select>
+        <div class="field-hint" id="modeHint">Opens a new MLLP connection to the device's listener port.</div>
+      </div>
+    </div>
+    <div class="form-row" id="manualHostRow">
+      <div class="form-group flex-1">
+        <label for="sendHost">Host / IP</label>
+        <input type="text" id="sendHost" placeholder="192.168.1.100">
+      </div>
+      <div class="form-group port-field">
+        <label for="sendPort">Port</label>
+        <input type="number" id="sendPort" value="2575" min="1" max="65535">
+      </div>
+    </div>
+    <div class="form-group">
+      <label for="sendMessage">HL7 Message</label>
+      <textarea id="sendMessage" rows="8" placeholder="MSH|^~\&amp;|…" required></textarea>
+    </div>
+    <div id="sendError" class="send-error" style="display:none"></div>
+    <div class="send-actions">
+      <button type="submit" class="btn-primary" id="sendSubmit">
+        <span id="sendBtnLabel">Send Message</span>
+        <span id="sendBtnSpinner" class="spinner" style="display:none"></span>
+      </button>
+    </div>
+  </form>
+</section>
+
+<!-- Messages -->
+<section class="panel">
+  <div class="panel-header">
+    <h2>Messages</h2>
+    <div class="tab-bar">
+      <button class="tab active" data-filter="all">All</button>
+      <button class="tab" data-filter="received">Received</button>
+      <button class="tab" data-filter="sent">Sent</button>
+    </div>
+    <div class="search-box">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+      <input type="text" id="searchInput" placeholder="Search messages…">
+    </div>
+  </div>
+  <div class="panel-body" id="messageList">
+    <div class="empty-state" id="emptyMessages">Loading messages…</div>
+  </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/index.js"></script>
+{% endblock %}

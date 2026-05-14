@@ -1,0 +1,210 @@
+"""MLLP servers for receiving ORU results and ORM connections from analyzers."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from collections.abc import Awaitable, Callable
+from datetime import datetime, timezone
+
+import hl7
+import hl7.mllp
+
+from mllp_gateway.connection_manager import ConnectionManager
+from mllp_gateway.message_store import MessageStore
+from mllp_gateway.mllp.common import validate_hl7
+
+logger = logging.getLogger(__name__)
+
+# Signature: (raw_message, peer_ip) -> None
+ForwardCallback = Callable[[str, str], Awaitable[None]]
+
+# Maximum pending messages in the per-connection forward queue.
+_FORWARD_QUEUE_SIZE = 1000
+
+# Retry configuration for failed forwards
+MAX_RETRIES = 3
+RETRY_BACKOFF_BASE = 2  # seconds — exponential: 2, 4, 8
+
+
+def _peer_ip(writer: hl7.mllp.HL7StreamWriter) -> str:
+    peername = writer.get_extra_info("peername")
+    return peername[0] if peername else "unknown"
+
+
+async def start_oru_server(
+    host: str,
+    port: int,
+    connections: ConnectionManager,
+    forward: ForwardCallback,
+    store: MessageStore,
+) -> asyncio.Server:
+    """Start the MLLP server that receives ORU (result) messages.
+
+    Each connection gets a per-device forward queue and background worker
+    that retries CARE API forwarding with exponential backoff.
+    """
+
+    async def handler(
+        reader: hl7.mllp.HL7StreamReader, writer: hl7.mllp.HL7StreamWriter
+    ):
+        ip = _peer_ip(writer)
+        logger.info("ORU connection from %s", ip)
+        connections.register_oru(ip, reader, writer)
+
+        queue: asyncio.Queue[tuple[int, str] | None] = asyncio.Queue(maxsize=_FORWARD_QUEUE_SIZE)
+        worker = asyncio.create_task(_forward_worker(ip, queue, forward, store))
+
+        try:
+            while True:
+                msg = await reader.readmessage()
+                connections.record_activity(ip)
+
+                # If an ORM was sent in shared mode (piggybacking on this ORU
+                # connection), a future is waiting for the device's ACK. The
+                # next inbound message is that ACK — not a new ORU result.
+                fut = connections.pop_oru_response_future(ip)
+                if fut is not None and not fut.done():
+                    fut.set_result(msg)
+                    continue
+
+                ack = msg.create_ack()
+                writer.writemessage(ack)
+                await writer.drain()
+                raw = str(msg).replace("\r", "\n")
+                ack_text = str(ack).replace("\r", "\n")
+
+                if validate_hl7(raw) is not None:
+                    logger.warning(
+                        "Received malformed HL7 from %s — ACK sent but not forwarding",
+                        ip,
+                    )
+                    continue
+
+                row = await store.insert(
+                    "received",
+                    message=raw,
+                    ack=ack_text,
+                    peer=ip,
+                    time=datetime.now(timezone.utc).isoformat(),
+                )
+
+                # Non-blocking put: if queue is full, log and skip to avoid
+                # blocking the handler (which would prevent ACKs to the analyzer)
+                try:
+                    queue.put_nowait((row["id"], raw))
+                except asyncio.QueueFull:
+                    logger.error(
+                        "Forward queue full for %s — message %d will be retried from store",
+                        ip,
+                        row["id"],
+                    )
+        except asyncio.IncompleteReadError:
+            logger.info("ORU connection closed by %s", ip)
+        except ConnectionResetError:
+            logger.info("ORU connection reset by %s", ip)
+        except Exception as e:
+            logger.error("ORU handler error (%s): %s", ip, e)
+        finally:
+            await queue.put(None)
+            try:
+                await worker
+            except Exception:
+                pass
+            connections.unregister_oru(ip)
+            writer.close()
+            try:
+                await writer.writer.wait_closed()
+            except Exception:
+                pass
+
+    server = await hl7.mllp.start_hl7_server(handler, host=host, port=port)
+    logger.info("MLLP ORU listening on %s:%d", host, port)
+    return server
+
+
+async def start_orm_server(
+    host: str,
+    port: int,
+    connections: ConnectionManager,
+) -> asyncio.Server:
+    """Start the MLLP server that accepts ORM (order) connections from analyzers.
+
+    Inbound messages are placed on the device’s response queue so
+    :func:`~mllp_gateway.mllp.client.send_order` can read them.
+    """
+
+    async def handler(
+        reader: hl7.mllp.HL7StreamReader, writer: hl7.mllp.HL7StreamWriter
+    ):
+        ip = _peer_ip(writer)
+        logger.info("ORM connection from %s", ip)
+        connections.register_orm(ip, reader, writer)
+        queue = connections.get_orm_response_queue(ip)
+
+        try:
+            while True:
+                msg = await reader.readmessage()
+                connections.record_activity(ip)
+                if queue is not None:
+                    await queue.put(msg)
+        except asyncio.IncompleteReadError:
+            logger.info("ORM connection closed by %s", ip)
+        except ConnectionResetError:
+            logger.info("ORM connection reset by %s", ip)
+        except Exception as e:
+            logger.error("ORM handler error (%s): %s", ip, e)
+        finally:
+            connections.unregister_orm(ip)
+            writer.close()
+            try:
+                await writer.writer.wait_closed()
+            except Exception:
+                pass
+
+    server = await hl7.mllp.start_hl7_server(handler, host=host, port=port)
+    logger.info("MLLP ORM listening on %s:%d", host, port)
+    return server
+
+
+async def _forward_worker(
+    peer_ip: str,
+    queue: asyncio.Queue[tuple[int, str] | None],
+    forward: ForwardCallback,
+    store: MessageStore,
+) -> None:
+    """Drain the forward queue, retrying each message up to MAX_RETRIES times."""
+    while True:
+        item = await queue.get()
+        if item is None:
+            return
+        msg_id, raw = item
+
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                await forward(raw, peer_ip)
+                logger.info("Forwarded ORU from %s (msg_id=%d)", peer_ip, msg_id)
+                await store.update_forward_status(msg_id, True)
+                break
+            except Exception as e:
+                if attempt == MAX_RETRIES:
+                    logger.error(
+                        "Forward permanently failed for msg_id=%d from %s after %d attempts: %s",
+                        msg_id,
+                        peer_ip,
+                        MAX_RETRIES,
+                        e,
+                    )
+                    await store.update_forward_status(msg_id, False)
+                else:
+                    delay = RETRY_BACKOFF_BASE**attempt
+                    logger.warning(
+                        "Forward attempt %d/%d failed for msg_id=%d from %s: %s — retrying in %ds",
+                        attempt,
+                        MAX_RETRIES,
+                        msg_id,
+                        peer_ip,
+                        e,
+                        delay,
+                    )
+                    await asyncio.sleep(delay)

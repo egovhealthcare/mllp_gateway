@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+
+{% block title %}
+  {% if msg.kind == "sent" %}Sent{% else %}Received{% endif %} Message #{{ msg.id }} — MLLP Gateway
+{% endblock %}
+
+{% block head %}
+<link rel="stylesheet" href="/static/css/message.css">
+{% endblock %}
+
+{% block content %}
+<a href="/" class="back-link">
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>
+  Dashboard
+</a>
+
+<div class="msg-detail-header">
+  <h1>
+    {% if msg.kind == "sent" %}Sent{% else %}Received{% endif %} Message
+    <span class="msg-id">#{{ msg.id }}</span>
+  </h1>
+</div>
+
+<div class="meta-bar">
+  <div class="meta-item">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+    <span id="metaTime">{{ msg.time }}</span>
+  </div>
+
+  {% if msg.kind == "sent" %}
+    <div class="meta-item">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+      <span>{{ msg.host }}:{{ msg.port }}</span>
+    </div>
+    <span class="badge {{ 'success' if msg.status == 'success' else 'error' }}">
+      {{ msg.status | upper }}
+    </span>
+  {% else %}
+    <div class="meta-item">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+      <span>{{ msg.peer }}</span>
+    </div>
+    <span class="badge received">RECEIVED</span>
+    {% if msg.forwarded %}
+      <span class="badge success">FORWARDED</span>
+    {% else %}
+      <span class="badge pending">PENDING</span>
+    {% endif %}
+  {% endif %}
+</div>
+
+<section class="detail-section">
+  <h2>Parsed Output</h2>
+  <div id="parsedOutput"></div>
+</section>
+
+<section class="detail-section">
+  <div class="section-header">
+    <h2>Raw Message</h2>
+    <button class="copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('rawMsg').textContent)">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+      Copy
+    </button>
+  </div>
+  <pre id="rawMsg">{{ msg.message }}</pre>
+</section>
+
+<section class="detail-section">
+  <div class="section-header">
+    <h2>{% if msg.kind == "sent" %}ACK Response{% else %}ACK Sent{% endif %}</h2>
+    <button class="copy-btn" onclick="navigator.clipboard.writeText(document.getElementById('ackMsg').textContent)">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+      Copy
+    </button>
+  </div>
+  <pre id="ackMsg">{{ msg.ack }}</pre>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/hl7-parser.js"></script>
+<script>
+  const rawMessage = {{ msg.message | tojson }};
+  renderParsedOutput(rawMessage);
+
+  // Format timestamp
+  const metaTime = document.getElementById("metaTime");
+  const d = new Date(metaTime.textContent);
+  if (!isNaN(d)) metaTime.textContent = d.toLocaleString();
+</script>
+{% endblock %}
