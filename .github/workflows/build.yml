@@ -12,7 +12,7 @@ jobs:
         include:
           - os: ubuntu-24.04
             artifact: mllp-gateway-linux-amd64
-          - os: macos-14
+          - os: macos-26
             artifact: mllp-gateway-darwin-arm64
           - os: windows-latest
             artifact: mllp-gateway-windows-amd64.exe
