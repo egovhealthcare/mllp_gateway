@@ -67,11 +67,13 @@ class TrayApp:
         on_exit: Callable[[], None],
         on_open_config: Callable[[], None],
         on_open_ui: Callable[[], None],
+        on_uninstall_service: Callable[[], None] | None = None,
     ):
         self._on_restart = on_restart
         self._on_exit = on_exit
         self._on_open_config = on_open_config
         self._on_open_ui = on_open_ui
+        self._on_uninstall_service = on_uninstall_service
 
         self._status = Status.STARTING
         self._tunnel_connected = False
@@ -151,6 +153,11 @@ class TrayApp:
             Menu.SEPARATOR,
             MenuItem("Restart", lambda: self._on_restart()),
             MenuItem("Open Config", lambda: self._on_open_config()),
+            MenuItem(
+                "Uninstall Service",
+                lambda: self._on_uninstall_service(),
+                visible=self._on_uninstall_service is not None,
+            ),
             MenuItem("Exit", lambda: self._on_exit()),
         ]
         return Menu(*items)

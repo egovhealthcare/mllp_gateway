@@ -11,6 +11,7 @@ from mllp_gateway.config import APP_DIR
 __all__ = [
     "acquire_instance_lock",
     "hide_console",
+    "is_admin",
     "is_frozen",
     "owns_console",
     "release_instance_lock",
@@ -27,6 +28,15 @@ _instance_mutex = None
 def is_frozen() -> bool:
     """True when running as a PyInstaller bundle."""
     return getattr(sys, "frozen", False)
+
+
+def is_admin() -> bool:
+    """True when the process has administrator/root privileges."""
+    if sys.platform == "win32":
+        import ctypes
+
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    return os.getuid() == 0
 
 
 def release_instance_lock() -> None:

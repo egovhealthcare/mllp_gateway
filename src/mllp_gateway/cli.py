@@ -18,6 +18,7 @@ from mllp_gateway.gateway import run as run_gateway
 from mllp_gateway.process import (
     acquire_instance_lock,
     hide_console,
+    is_admin,
     is_frozen,
     owns_console,
 )
@@ -150,12 +151,24 @@ def entrypoint() -> None:
                 return
 
             _setup_logging(to_file=True)
+
+            if sys.platform == "win32" and not is_admin():
+                # schtasks requires elevation to create ONLOGON triggers.
+                print(
+                    "Error: Administrator privileges required.\n"
+                    "Please right-click the executable and select 'Run as administrator'."
+                )
+                input("\nPress Enter to close...")
+                sys.exit(1)
+
             auto_update_and_restart(config)
 
             try:
                 ensure_service()
             except Exception as exc:
-                sys.exit(f"\nError: {exc}")
+                print(f"\nError: {exc}")
+                input("\nPress Enter to close...")
+                sys.exit(1)
             finally:
                 if owns_console():
                     input("\nPress Enter to close...")

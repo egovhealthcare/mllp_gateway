@@ -255,11 +255,18 @@ def run_with_tray(config: Config) -> None:
         restart_requested = True
         loop.call_soon_threadsafe(stop.set)
 
+    def uninstall_service():
+        from mllp_gateway.service import uninstall_service
+
+        uninstall_service()
+        loop.call_soon_threadsafe(stop.set)
+
     tray = TrayApp(
         on_restart=request_restart,
         on_exit=lambda: loop.call_soon_threadsafe(stop.set),
         on_open_config=open_config,
         on_open_ui=open_ui,
+        on_uninstall_service=uninstall_service,
     )
 
     def asyncio_thread():
