@@ -11,12 +11,15 @@ from mllp_gateway.mllp import ORM_MODES, dispatch_order
 
 logger = logging.getLogger(__name__)
 
-_PUBLIC_PATHS = {"/openid-configuration/", "/health"}
+
+def auth_required(handler):
+    handler._auth_required = True
+    return handler
 
 
 @web.middleware
 async def _auth_middleware(request: web.Request, handler) -> web.StreamResponse:
-    if request.app.get("disable_auth") or request.path in _PUBLIC_PATHS:
+    if request.app.get("disable_auth") or not getattr(handler, "_auth_required", False):
         return await handler(request)
 
     auth = request.app["auth"]
@@ -36,6 +39,7 @@ async def _auth_middleware(request: web.Request, handler) -> web.StreamResponse:
     return await handler(request)
 
 
+@auth_required
 async def _handle_send_order(request: web.Request) -> web.Response:
     """POST /send-order — dispatch an ORM message to a lab analyzer."""
     connections: ConnectionManager = request.app["connections"]
@@ -78,6 +82,10 @@ async def _handle_health(request: web.Request) -> web.Response:
     )
 
 
+async def _handle_status(request: web.Request) -> web.Response:
+    return web.json_response({"server": True, "database": True})
+
+
 async def _handle_openid(request: web.Request) -> web.Response:
     return web.json_response(request.app["auth"].get_public_jwks())
 
@@ -92,12 +100,15 @@ def create_app(
     """Build the aiohttp application for the CARE-facing REST API."""
     if disable_auth:
         logger.warning("API authentication is disabled")
-    app = web.Application(middlewares=[_auth_middleware])
+    app = web.Application(
+        middlewares=[web.normalize_path_middleware(append_slash=True, remove_slash=False), _auth_middleware]
+    )
     app["auth"] = care_client.auth
     app["connections"] = connections
     app["store"] = store
     app["disable_auth"] = disable_auth
-    app.router.add_post("/send-order", _handle_send_order)
-    app.router.add_get("/health", _handle_health)
+    app.router.add_post("/send-order/", _handle_send_order)
+    app.router.add_get("/health/", _handle_health)
+    app.router.add_get("/status/", _handle_status)
     app.router.add_get("/openid-configuration/", _handle_openid)
     return app
