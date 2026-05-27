@@ -277,6 +277,40 @@ async function refreshConnections() {
 }
 
 // -------------------------------------------------------------------
+// Configured Devices (from CARE)
+// -------------------------------------------------------------------
+
+async function refreshConfiguredDevices() {
+  try {
+    const resp = await wsRequest("get_configured_devices");
+    const devices = resp.data;
+    const container = document.getElementById("configuredDevices");
+
+    if (!devices || devices.length === 0) {
+      container.innerHTML = '<div class="empty-state">No devices configured in CARE</div>';
+      return;
+    }
+
+    container.innerHTML = '<div class="configured-device-list">' + devices.map(dev => {
+      const statusClass = dev.connected ? "status-connected" : "status-disconnected";
+      const statusLabel = dev.connected ? "Connected" : "Disconnected";
+      const name = dev.registered_name || dev.endpoint_address || dev.id;
+      const subtitle = dev.endpoint_address ? dev.endpoint_address : "No IP configured";
+      const typeBadge = dev.type ? `<span class="device-type-badge">${escapeHtml(dev.type)}</span>` : "";
+      return `<div class="configured-device-card ${statusClass}">
+        <div class="configured-device-status">
+          <span class="status-indicator ${statusClass}"></span>
+        </div>
+        <div class="configured-device-info">
+          <div class="configured-device-name">${escapeHtml(name)} ${typeBadge}</div>
+          <div class="configured-device-subtitle">${escapeHtml(subtitle)} · ${escapeHtml(statusLabel)}</div>
+        </div>
+      </div>`;
+    }).join("") + '</div>';
+  } catch (_) {}
+}
+
+// -------------------------------------------------------------------
 // Tabs & search
 // -------------------------------------------------------------------
 
@@ -449,6 +483,7 @@ async function loadInitial() {
 
   refreshStats();
   refreshConnections();
+  refreshConfiguredDevices();
 }
 
 // connectWS triggers loadInitial once connected
@@ -456,5 +491,6 @@ connectWS();
 
 // Periodic refresh for connections and relative times
 setInterval(refreshConnections, 10000);
+setInterval(refreshConfiguredDevices, 10000);
 setInterval(refreshStats, 30000);
 setInterval(renderMessages, 60000);  // Update relative times

@@ -19,10 +19,13 @@ logger = logging.getLogger(__name__)
 # Signature: (raw_message, peer_ip) -> None
 ForwardCallback = Callable[[str, str], Awaitable[None]]
 
-# Maximum pending messages in the per-connection forward queue.
+# Signature: (msg, peer_ip, writer) -> None
+WorklistHandler = Callable[
+    [hl7.Message, str, hl7.mllp.HL7StreamWriter], Awaitable[None]
+]
+
 _FORWARD_QUEUE_SIZE = 1000
 
-# Retry configuration for failed forwards
 MAX_RETRIES = 3
 RETRY_BACKOFF_BASE = 2  # seconds — exponential: 2, 4, 8
 
@@ -32,17 +35,30 @@ def _peer_ip(writer: hl7.mllp.HL7StreamWriter) -> str:
     return peername[0] if peername else "unknown"
 
 
+def _get_message_type(msg: hl7.Message) -> str:
+    """Extract MSH-9 (message type) from an HL7 message, e.g. 'ORM^O01'."""
+    try:
+        return str(msg.segment("MSH")(9))
+    except (IndexError, KeyError):
+        return ""
+
+
 async def start_oru_server(
     host: str,
     port: int,
     connections: ConnectionManager,
     forward: ForwardCallback,
     store: MessageStore,
+    worklist_handler: WorklistHandler | None = None,
 ) -> asyncio.Server:
     """Start the MLLP server that receives ORU (result) messages.
 
     Each connection gets a per-device forward queue and background worker
     that retries CARE API forwarding with exponential backoff.
+
+    If *worklist_handler* is provided, QRY^Q02 and ORM^O01 messages on
+    this port are routed to it instead of being forwarded as results
+    (supports single-port analyzers like ADX AutoChem 200).
     """
 
     async def handler(
@@ -59,18 +75,48 @@ async def start_oru_server(
             while True:
                 msg = await reader.readmessage()
                 connections.record_activity(ip)
+                msg_type = _get_message_type(msg)
+                logger.info("[DEVICE <--] Received %s from %s (ORU connection)", msg_type or "message", ip)
 
-                # If an ORM was sent in shared mode (piggybacking on this ORU
-                # connection), a future is waiting for the device's ACK. The
-                # next inbound message is that ACK — not a new ORU result.
+                # Shared-mode ORM ACK: a future is waiting for the device's response
                 fut = connections.pop_oru_response_future(ip)
                 if fut is not None and not fut.done():
                     fut.set_result(msg)
                     continue
 
+                # Route worklist queries to handler (single-port analyzers)
+                if msg_type in ("ORM^O01", "QRY^Q02") and worklist_handler is not None:
+                    raw = str(msg).replace("\r", "\n")
+                    await store.insert(
+                        "received",
+                        message=raw,
+                        ack="",
+                        peer=ip,
+                        time=datetime.now(timezone.utc).isoformat(),
+                        forwarded=1,
+                    )
+                    await worklist_handler(msg, ip, writer)
+                    logger.info("[DEVICE -->] Sent worklist response to %s (ORU connection)", ip)
+                    continue
+
+                # Non-result messages (ACK^Q03, etc.) — store but don't forward
+                if not msg_type.startswith("ORU"):
+                    raw = str(msg).replace("\r", "\n")
+                    await store.insert(
+                        "received",
+                        message=raw,
+                        ack="",
+                        peer=ip,
+                        time=datetime.now(timezone.utc).isoformat(),
+                        forwarded=1,
+                    )
+                    logger.info("Stored non-result message %s from %s (not forwarding)", msg_type, ip)
+                    continue
+
                 ack = msg.create_ack()
                 writer.writemessage(ack)
                 await writer.drain()
+                logger.info("[DEVICE -->] Sent ACK to %s (ORU connection)", ip)
                 raw = str(msg).replace("\r", "\n")
                 ack_text = str(ack).replace("\r", "\n")
 
@@ -89,8 +135,8 @@ async def start_oru_server(
                     time=datetime.now(timezone.utc).isoformat(),
                 )
 
-                # Non-blocking put: if queue is full, log and skip to avoid
-                # blocking the handler (which would prevent ACKs to the analyzer)
+                # Non-blocking put: if queue is full, the retry worker will
+                # pick it up from the store later
                 try:
                     queue.put_nowait((row["id"], raw))
                 except asyncio.QueueFull:
@@ -127,11 +173,13 @@ async def start_orm_server(
     host: str,
     port: int,
     connections: ConnectionManager,
+    store: MessageStore,
+    worklist_handler: WorklistHandler | None = None,
 ) -> asyncio.Server:
     """Start the MLLP server that accepts ORM (order) connections from analyzers.
 
-    Inbound messages are placed on the device’s response queue so
-    :func:`~mllp_gateway.mllp.client.send_order` can read them.
+    Inbound messages are either ACKs to orders we sent (placed on response
+    queue for send_order) or ORM^O01 worklist queries from the analyzer.
     """
 
     async def handler(
@@ -146,7 +194,22 @@ async def start_orm_server(
             while True:
                 msg = await reader.readmessage()
                 connections.record_activity(ip)
-                if queue is not None:
+
+                msg_type = _get_message_type(msg)
+                logger.info("[DEVICE <--] Received %s from %s (ORM connection)", msg_type or "message", ip)
+                if msg_type in ("ORM^O01", "QRY^Q02") and worklist_handler is not None:
+                    raw = str(msg).replace("\r", "\n")
+                    await store.insert(
+                        "received",
+                        message=raw,
+                        ack="",
+                        peer=ip,
+                        time=datetime.now(timezone.utc).isoformat(),
+                        forwarded=1,
+                    )
+                    await worklist_handler(msg, ip, writer)
+                    logger.info("[DEVICE -->] Sent worklist response to %s (ORM connection)", ip)
+                elif queue is not None:
                     await queue.put(msg)
         except asyncio.IncompleteReadError:
             logger.info("ORM connection closed by %s", ip)

@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 from pathlib import Path
+from typing import Any
 
 import jinja2
 from aiohttp import web
@@ -27,13 +28,7 @@ _jinja_env = jinja2.Environment(
 
 
 def _dumps(obj: object) -> str:
-    return json.dumps(obj, default=_json_default)
-
-
-def _json_default(obj):
-    # Fallback serializer: converts datetimes, Paths, etc. to strings
-    # rather than crashing. Intentionally broad — the web UI is debug-facing.
-    return str(obj)
+    return json.dumps(obj, default=str)
 
 
 async def _handle_index(request: web.Request) -> web.Response:
@@ -55,8 +50,8 @@ async def _handle_message_detail(request: web.Request) -> web.Response:
 
 
 async def _ws_handle_request(
-    msg_data: dict, store: MessageStore, connections: ConnectionManager
-) -> dict:
+    msg_data: dict[str, Any], store: MessageStore, connections: ConnectionManager
+) -> dict[str, Any]:
     """Handle an incoming WS request and return a response dict."""
     req_type = msg_data.get("type", "")
     req_id = msg_data.get("id")
@@ -82,6 +77,13 @@ async def _ws_handle_request(
             "data": connections.get_connection_status(),
         }
 
+    if req_type == "get_configured_devices":
+        return {
+            "type": "configured_devices",
+            "id": req_id,
+            "data": connections.get_configured_device_status(),
+        }
+
     if req_type == "send":
         return await _ws_handle_send(msg_data, store, connections, req_id)
 
@@ -93,8 +95,11 @@ async def _ws_handle_request(
 
 
 async def _ws_handle_send(
-    msg_data: dict, store: MessageStore, connections: ConnectionManager, req_id
-) -> dict:
+    msg_data: dict[str, Any],
+    store: MessageStore,
+    connections: ConnectionManager,
+    req_id: Any,
+) -> dict[str, Any]:
     raw_message = (msg_data.get("message") or "").strip()
     host = (msg_data.get("host") or "").strip()
     mode = (msg_data.get("mode") or "client").strip()
@@ -190,14 +195,6 @@ async def _handle_ws(request: web.Request) -> web.WebSocketResponse:
     return ws_resp
 
 
-class _StaticFilter(logging.Filter):
-    """Suppress noisy access-log entries for static asset requests."""
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        msg = record.getMessage()
-        return "/static/" not in msg
-
-
 def create_ui_app(
     store: MessageStore, connections: ConnectionManager
 ) -> web.Application:
@@ -210,7 +207,5 @@ def create_ui_app(
     app.router.add_get("/message/{id}", _handle_message_detail)
     app.router.add_get("/ws", _handle_ws)
     app.router.add_static("/static", _STATIC_DIR, show_index=False)
-
-    logging.getLogger("aiohttp.access").addFilter(_StaticFilter())
 
     return app

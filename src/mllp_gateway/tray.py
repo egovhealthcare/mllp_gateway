@@ -79,6 +79,8 @@ class TrayApp:
         self._tunnel_connected = False
         self._care_api_connected = False
         self._device_count = 0
+        self._configured_device_count = 0
+        self._all_configured_connected = True
         self._update_info: UpdateInfo | None = None
         self._icon: Icon | None = None
 
@@ -98,12 +100,32 @@ class TrayApp:
         self._care_api_connected = connected
         if not connected and self._status == Status.RUNNING:
             self._status = Status.DEGRADED
-        elif connected and self._status == Status.DEGRADED:
+        elif (
+            connected
+            and self._status == Status.DEGRADED
+            and self._all_configured_connected
+        ):
             self._status = Status.RUNNING
         self._refresh()
 
     def update_connections(self, device_count: int) -> None:
         self._device_count = device_count
+        self._refresh()
+
+    def update_configured_devices_status(
+        self, all_connected: bool, connected_count: int, configured_count: int
+    ) -> None:
+        self._all_configured_connected = all_connected
+        self._configured_device_count = configured_count
+        self._device_count = connected_count
+        if self._status == Status.RUNNING and not all_connected:
+            self._status = Status.DEGRADED
+        elif (
+            self._status == Status.DEGRADED
+            and all_connected
+            and self._care_api_connected
+        ):
+            self._status = Status.RUNNING
         self._refresh()
 
     def update_available(self, info: UpdateInfo) -> None:
@@ -145,11 +167,14 @@ class TrayApp:
 
         tunnel = "Connected" if self._tunnel_connected else "Disconnected"
         care_api = "Connected" if self._care_api_connected else "Disconnected"
+        device_label = (
+            f"Devices: {self._device_count}/{self._configured_device_count} connected"
+        )
         items += [
             Menu.SEPARATOR,
             MenuItem(f"CARE API: {care_api}", None, enabled=False),
             MenuItem(f"Tunnel: {tunnel}", None, enabled=False),
-            MenuItem(f"Devices: {self._device_count}", None, enabled=False),
+            MenuItem(device_label, None, enabled=False),
             Menu.SEPARATOR,
             MenuItem("Restart", lambda: self._on_restart()),
             MenuItem("Open Config", lambda: self._on_open_config()),

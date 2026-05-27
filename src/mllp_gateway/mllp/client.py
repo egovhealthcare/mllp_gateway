@@ -160,6 +160,7 @@ async def dispatch_order(
 
     now = datetime.now(timezone.utc).isoformat()
 
+    logger.info("[DEVICE -->] Sending ORM to %s:%d (mode=%s)", device_ip, port, orm_mode)
     try:
         ack = await send_order(
             connections, device_ip, port, raw_message, orm_mode, timeout
@@ -210,6 +211,7 @@ async def dispatch_order(
         return OrderResult(ok=False, error=err)
 
     ack_text = ack.replace("\r", "\n") if ack else ""
+    logger.info("[DEVICE <--] Received ACK from %s:%d (mode=%s)", device_ip, port, orm_mode)
     await store.insert(
         "sent",
         message=raw_message,

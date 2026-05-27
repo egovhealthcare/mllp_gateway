@@ -1,9 +1,11 @@
 """Manages active ORU/ORM device connections and per-device send state."""
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import time
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import hl7.mllp
 
@@ -11,7 +13,6 @@ __all__ = ["ConnectionManager", "IDLE_THRESHOLD_SECONDS"]
 
 logger = logging.getLogger(__name__)
 
-# A device is considered idle if no activity for this long.
 IDLE_THRESHOLD_SECONDS = 300
 
 
@@ -32,26 +33,20 @@ class ConnectionManager:
     """Tracks active ORU/ORM device connections by IP.
 
     Devices connect via two MLLP channels:
-    - ORU (results): device → gateway. Always device-initiated.
-    - ORM (orders): gateway → device. Three delivery modes:
-        shared — piggyback ORM onto the existing ORU connection;
-        server — use a dedicated ORM connection the device opens;
-        client — gateway opens a new connection to the device.
+    - ORU (results): device → gateway, always device-initiated.
+    - ORM (orders): gateway → device via shared, server, or client mode.
 
-    For shared mode, a temporary asyncio.Future is registered so the
-    ORU server handler knows the next inbound message is the ORM ACK
-    (not a new result). See set_oru_response_future / pop_oru_response_future.
-
-    Reconnection handling: when a device reconnects from the same IP, the
-    previous connection is closed gracefully before the new one is registered.
+    For shared mode, a temporary Future is registered so the ORU handler
+    knows the next inbound message is an ORM ACK rather than a new result.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._oru: dict[str, Connection] = {}
         self._orm: dict[str, ORMConnection] = {}
         self._oru_send_lock: dict[str, asyncio.Lock] = {}
-        self._oru_response_future: dict[str, asyncio.Future] = {}
+        self._oru_response_future: dict[str, asyncio.Future[hl7.Message]] = {}
         self._last_activity: dict[str, float] = {}
+        self._configured_devices: list[dict[str, Any]] = []
 
     def _close_writer(self, writer: hl7.mllp.HL7StreamWriter) -> None:
         """Close a writer silently, ignoring errors on already-closed sockets."""
@@ -96,13 +91,12 @@ class ConnectionManager:
     def get_oru_send_lock(self, ip: str) -> asyncio.Lock | None:
         return self._oru_send_lock.get(ip)
 
-    def set_oru_response_future(self, ip: str, fut: asyncio.Future) -> None:
-        """Register a future the ORU handler will resolve with the next
-        inbound message from this device (used for shared-mode ORM ACKs)."""
+    def set_oru_response_future(self, ip: str, fut: asyncio.Future[hl7.Message]) -> None:
+        """Register a future to be resolved with the next inbound message."""
         self._oru_response_future[ip] = fut
 
-    def pop_oru_response_future(self, ip: str) -> asyncio.Future | None:
-        """Remove and return the pending response future, or None if absent."""
+    def pop_oru_response_future(self, ip: str) -> asyncio.Future[hl7.Message] | None:
+        """Remove and return the pending response future, or None."""
         return self._oru_response_future.pop(ip, None)
 
     def register_orm(
@@ -142,7 +136,8 @@ class ConnectionManager:
             return False
         return (time.monotonic() - last) < IDLE_THRESHOLD_SECONDS
 
-    def get_connection_status(self) -> dict:
+    def get_connection_status(self) -> dict[str, dict[str, Any]]:
+        """Return connection status for all known device IPs."""
         ips = sorted(set(self._oru) | set(self._orm))
         return {
             ip: {
@@ -169,3 +164,51 @@ class ConnectionManager:
     @property
     def device_count(self) -> int:
         return len(set(self._oru) | set(self._orm))
+
+    def set_configured_devices(self, devices: list[dict[str, Any]]) -> None:
+        """Store the list of devices configured for this gateway in CARE."""
+        self._configured_devices = devices
+
+    @property
+    def configured_devices(self) -> list[dict[str, Any]]:
+        return self._configured_devices
+
+    def get_configured_device_status(self) -> list[dict[str, Any]]:
+        """Return configured devices with their connection status."""
+        result = []
+        for dev in self._configured_devices:
+            ip = dev.get("endpoint_address")
+            connected = ip is not None and (ip in self._oru or ip in self._orm)
+            result.append({
+                **dev,
+                "connected": connected,
+                "oru_connected": ip in self._oru if ip else False,
+                "orm_connected": ip in self._orm if ip else False,
+            })
+        return result
+
+    @property
+    def all_configured_connected(self) -> bool:
+        """True if every configured device with an endpoint_address is connected."""
+        if not self._configured_devices:
+            return True
+        for dev in self._configured_devices:
+            ip = dev.get("endpoint_address")
+            if ip and ip not in self._oru and ip not in self._orm:
+                return False
+        return True
+
+    @property
+    def configured_connected_count(self) -> int:
+        """Count of configured devices that are currently connected."""
+        count = 0
+        for dev in self._configured_devices:
+            ip = dev.get("endpoint_address")
+            if ip and (ip in self._oru or ip in self._orm):
+                count += 1
+        return count
+
+    @property
+    def configured_device_count(self) -> int:
+        """Total number of configured devices."""
+        return len(self._configured_devices)
