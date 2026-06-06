@@ -20,6 +20,7 @@ __all__ = ["run"]
 from mllp_gateway.care import CareClient, create_app
 from mllp_gateway.config import CONFIG_FILE, Config
 from mllp_gateway.connection_manager import ConnectionManager
+from mllp_gateway.device_runner import run_configured_devices
 from mllp_gateway.message_store import MessageStore
 from mllp_gateway.mllp import start_orm_server, start_oru_server
 from mllp_gateway.mllp.worklist import (
@@ -27,6 +28,7 @@ from mllp_gateway.mllp.worklist import (
     build_qck_error_response,
 )
 from mllp_gateway.process import restart_process
+from mllp_gateway.transport.device import parse_device_configs
 from mllp_gateway.updater import periodic_update_check
 from mllp_gateway.web import create_ui_app
 
@@ -91,7 +93,9 @@ async def _retry_unforwarded(
                 if stop_event.is_set():
                     return
                 try:
-                    await care.forward_result(msg["message"], msg["peer"])
+                    await care.forward_result(
+                        msg["message"], msg["peer"], sender_device_id=msg["peer"]
+                    )
                     await store.update_forward_status(msg["id"], True)
                 except Exception as e:
                     logger.debug(
@@ -261,10 +265,37 @@ async def run_gateway(
     # validation callback can reach our OpenID endpoint)
     if tunnel_proc:
         await asyncio.sleep(3)  # Give tunnel time to register with Cloudflare
+
+    device_tasks: list[asyncio.Task] = []
+
+    def _apply_configured_devices(raw_devices: list[dict]) -> None:
+        """Register devices for status tracking and start their runners.
+
+        Ethernet + HL7 devices use the shared MLLP listeners; serial and ASTM
+        devices each get a dedicated runner task.
+        """
+        device_configs = parse_device_configs(raw_devices)
+        enriched = []
+        for cfg in device_configs:
+            raw = dict(cfg.raw)
+            raw["connection_key"] = cfg.connection_key
+            enriched.append(raw)
+        connections.set_configured_devices(enriched)
+        device_tasks.extend(
+            run_configured_devices(
+                device_configs,
+                connections,
+                care,
+                store,
+                worklist_handler,
+                stop_event,
+            )
+        )
+
     configured_devices = await care.fetch_configured_devices()
-    connections.set_configured_devices(configured_devices)
     if configured_devices:
         logger.info("Loaded %d configured devices from CARE", len(configured_devices))
+        _apply_configured_devices(configured_devices)
     else:
         logger.warning("No configured devices fetched from CARE (will retry periodically)")
 
@@ -327,7 +358,7 @@ async def run_gateway(
                 pass
             devices = await care.fetch_configured_devices()
             if devices:
-                connections.set_configured_devices(devices)
+                _apply_configured_devices(devices)
                 logger.info("Loaded %d configured devices from CARE (retry)", len(devices))
 
     tasks.append(asyncio.create_task(_refresh_configured_devices()))
@@ -344,6 +375,8 @@ async def run_gateway(
     if tunnel_proc:
         stop_tunnel(tunnel_proc)
     for t in tasks:
+        t.cancel()
+    for t in device_tasks:
         t.cancel()
     await care.close()
     await runner.cleanup()

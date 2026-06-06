@@ -64,109 +64,136 @@ async def start_oru_server(
     async def handler(
         reader: hl7.mllp.HL7StreamReader, writer: hl7.mllp.HL7StreamWriter
     ):
-        ip = _peer_ip(writer)
-        logger.info("ORU connection from %s", ip)
-        connections.register_oru(ip, reader, writer)
-
-        queue: asyncio.Queue[tuple[int, str] | None] = asyncio.Queue(maxsize=_FORWARD_QUEUE_SIZE)
-        worker = asyncio.create_task(_forward_worker(ip, queue, forward, store))
-
-        try:
-            while True:
-                msg = await reader.readmessage()
-                connections.record_activity(ip)
-                msg_type = _get_message_type(msg)
-                logger.info("[DEVICE <--] Received %s from %s (ORU connection)", msg_type or "message", ip)
-
-                # Shared-mode ORM ACK: a future is waiting for the device's response
-                fut = connections.pop_oru_response_future(ip)
-                if fut is not None and not fut.done():
-                    fut.set_result(msg)
-                    continue
-
-                # Route worklist queries to handler (single-port analyzers)
-                if msg_type in ("ORM^O01", "QRY^Q02") and worklist_handler is not None:
-                    raw = str(msg).replace("\r", "\n")
-                    await store.insert(
-                        "received",
-                        message=raw,
-                        ack="",
-                        peer=ip,
-                        time=datetime.now(timezone.utc).isoformat(),
-                        forwarded=1,
-                    )
-                    await worklist_handler(msg, ip, writer)
-                    logger.info("[DEVICE -->] Sent worklist response to %s (ORU connection)", ip)
-                    continue
-
-                # Non-result messages (ACK^Q03, etc.) — store but don't forward
-                if not msg_type.startswith("ORU"):
-                    raw = str(msg).replace("\r", "\n")
-                    await store.insert(
-                        "received",
-                        message=raw,
-                        ack="",
-                        peer=ip,
-                        time=datetime.now(timezone.utc).isoformat(),
-                        forwarded=1,
-                    )
-                    logger.info("Stored non-result message %s from %s (not forwarding)", msg_type, ip)
-                    continue
-
-                ack = msg.create_ack()
-                writer.writemessage(ack)
-                await writer.drain()
-                logger.info("[DEVICE -->] Sent ACK to %s (ORU connection)", ip)
-                raw = str(msg).replace("\r", "\n")
-                ack_text = str(ack).replace("\r", "\n")
-
-                if validate_hl7(raw) is not None:
-                    logger.warning(
-                        "Received malformed HL7 from %s — ACK sent but not forwarding",
-                        ip,
-                    )
-                    continue
-
-                row = await store.insert(
-                    "received",
-                    message=raw,
-                    ack=ack_text,
-                    peer=ip,
-                    time=datetime.now(timezone.utc).isoformat(),
-                )
-
-                # Non-blocking put: if queue is full, the retry worker will
-                # pick it up from the store later
-                try:
-                    queue.put_nowait((row["id"], raw))
-                except asyncio.QueueFull:
-                    logger.error(
-                        "Forward queue full for %s — message %d will be retried from store",
-                        ip,
-                        row["id"],
-                    )
-        except asyncio.IncompleteReadError:
-            logger.info("ORU connection closed by %s", ip)
-        except ConnectionResetError:
-            logger.info("ORU connection reset by %s", ip)
-        except Exception as e:
-            logger.error("ORU handler error (%s): %s", ip, e)
-        finally:
-            await queue.put(None)
-            try:
-                await worker
-            except Exception:
-                pass
-            connections.unregister_oru(ip)
-            writer.close()
-            try:
-                await writer.writer.wait_closed()
-            except Exception:
-                pass
+        await serve_oru_connection(
+            reader,
+            writer,
+            _peer_ip(writer),
+            connections,
+            forward,
+            store,
+            worklist_handler=worklist_handler,
+        )
 
     server = await hl7.mllp.start_hl7_server(handler, host=host, port=port)
     logger.info("MLLP ORU listening on %s:%d", host, port)
     return server
+
+
+async def serve_oru_connection(
+    reader: hl7.mllp.HL7StreamReader,
+    writer: hl7.mllp.HL7StreamWriter,
+    peer_id: str,
+    connections: ConnectionManager,
+    forward: ForwardCallback,
+    store: MessageStore,
+    worklist_handler: WorklistHandler | None = None,
+) -> None:
+    """Serve a single ORU (result) link until it closes.
+
+    Shared by the TCP listener (one call per inbound connection) and the
+    serial runner (one call per opened serial link). *peer_id* identifies the
+    device for connection tracking and message tagging — an IP for Ethernet,
+    the device's connection key for serial.
+    """
+    ip = peer_id
+    logger.info("ORU connection from %s", ip)
+    connections.register_oru(ip, reader, writer)
+
+    queue: asyncio.Queue[tuple[int, str] | None] = asyncio.Queue(maxsize=_FORWARD_QUEUE_SIZE)
+    worker = asyncio.create_task(_forward_worker(ip, queue, forward, store))
+
+    try:
+        while True:
+            msg = await reader.readmessage()
+            connections.record_activity(ip)
+            msg_type = _get_message_type(msg)
+            logger.info("[DEVICE <--] Received %s from %s (ORU connection)", msg_type or "message", ip)
+
+            # Shared-mode ORM ACK: a future is waiting for the device's response
+            fut = connections.pop_oru_response_future(ip)
+            if fut is not None and not fut.done():
+                fut.set_result(msg)
+                continue
+
+            # Route worklist queries to handler (single-port analyzers)
+            if msg_type in ("ORM^O01", "QRY^Q02") and worklist_handler is not None:
+                raw = str(msg).replace("\r", "\n")
+                await store.insert(
+                    "received",
+                    message=raw,
+                    ack="",
+                    peer=ip,
+                    time=datetime.now(timezone.utc).isoformat(),
+                    forwarded=1,
+                )
+                await worklist_handler(msg, ip, writer)
+                logger.info("[DEVICE -->] Sent worklist response to %s (ORU connection)", ip)
+                continue
+
+            # Non-result messages (ACK^Q03, etc.) — store but don't forward
+            if not msg_type.startswith("ORU"):
+                raw = str(msg).replace("\r", "\n")
+                await store.insert(
+                    "received",
+                    message=raw,
+                    ack="",
+                    peer=ip,
+                    time=datetime.now(timezone.utc).isoformat(),
+                    forwarded=1,
+                )
+                logger.info("Stored non-result message %s from %s (not forwarding)", msg_type, ip)
+                continue
+
+            ack = msg.create_ack()
+            writer.writemessage(ack)
+            await writer.drain()
+            logger.info("[DEVICE -->] Sent ACK to %s (ORU connection)", ip)
+            raw = str(msg).replace("\r", "\n")
+            ack_text = str(ack).replace("\r", "\n")
+
+            if validate_hl7(raw) is not None:
+                logger.warning(
+                    "Received malformed HL7 from %s — ACK sent but not forwarding",
+                    ip,
+                )
+                continue
+
+            row = await store.insert(
+                "received",
+                message=raw,
+                ack=ack_text,
+                peer=ip,
+                time=datetime.now(timezone.utc).isoformat(),
+            )
+
+            # Non-blocking put: if queue is full, the retry worker will
+            # pick it up from the store later
+            try:
+                queue.put_nowait((row["id"], raw))
+            except asyncio.QueueFull:
+                logger.error(
+                    "Forward queue full for %s — message %d will be retried from store",
+                    ip,
+                    row["id"],
+                )
+    except asyncio.IncompleteReadError:
+        logger.info("ORU connection closed by %s", ip)
+    except ConnectionResetError:
+        logger.info("ORU connection reset by %s", ip)
+    except Exception as e:
+        logger.error("ORU handler error (%s): %s", ip, e)
+    finally:
+        await queue.put(None)
+        try:
+            await worker
+        except Exception:
+            pass
+        connections.unregister_oru(ip)
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
 
 
 async def start_orm_server(

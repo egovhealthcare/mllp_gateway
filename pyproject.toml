@@ -1,6 +1,6 @@
 [project]
 name = "mllp-gateway"
-version = "0.1.0"
+version = "0.3.0"
 description = "Standalone MLLP gateway for lab analyzer HL7 communication with CARE"
 readme = "README.md"
 license = "MIT"
@@ -16,6 +16,7 @@ dependencies = [
     "pystray>=0.19,<1",
     "Pillow>=12,<13",
     "tomli-w>=1.0,<2",
+    "pyserial-asyncio>=0.6",
 ]
 
 [project.scripts]

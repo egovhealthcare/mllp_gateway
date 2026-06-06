@@ -1,8 +1,15 @@
 # MLLP Gateway
 
-Standalone MLLP gateway for lab analyzer HL7 communication with [CARE](https://github.com/ohcnetwork/care).
+Standalone gateway for lab analyzer communication with [CARE](https://github.com/ohcnetwork/care).
 
-Receives HL7 ORU (results) and ORM (orders) messages over MLLP from lab analyzers, and forwards them to the CARE backend. Runs as a background service with a system tray icon showing live connection status.
+Bridges lab analyzers to the CARE backend across two independent axes:
+
+- **Transport** — **Ethernet** (TCP/IP) or **serial** (RS232).
+- **Protocol** — **HL7** (MLLP framing) or **ASTM** (E1381/E1394).
+
+All four combinations are supported (`hl7+ethernet`, `hl7+serial`, `astm+ethernet`, `astm+serial`). It receives results (and answers order queries) from analyzers, forwards them to CARE over HTTPS, and dispatches orders back to the instruments. Runs as a background service with a system tray icon showing live connection status.
+
+Per-analyzer transport, protocol, and connection settings are configured in CARE and fetched automatically — the gateway opens serial ports it owns, listens for inbound HL7/MLLP TCP connections, and dials out for ASTM-over-Ethernet as needed.
 
 ## Download
 

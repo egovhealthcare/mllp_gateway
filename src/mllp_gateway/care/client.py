@@ -70,22 +70,38 @@ class CareClient:
         except Exception:
             return False
 
-    async def forward_result(self, raw_message: str, sender_ip: str) -> dict[str, Any]:
-        """Forward an HL7 result to CARE with retries on transient failures."""
+    async def forward_result(
+        self,
+        raw_message: str,
+        sender_ip: str,
+        *,
+        sender_device_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Forward an HL7/ASTM result to CARE with retries on transient failures.
+
+        *sender_device_id* identifies the source device directly; it is
+        required for serial-attached analyzers, which have no IP for CARE to
+        match against ``endpoint_address``.
+        """
         if not self._session or self._session.closed:
             raise RuntimeError("CareClient session not active — call start() first")
 
         logger.info(
-            "[CARE -->] POST /api/lab_analyzer_device/communication/receive_result/ (sender_ip=%s)",
+            "[CARE -->] POST /api/lab_analyzer_device/communication/receive_result/ "
+            "(sender_ip=%s, sender_device_id=%s)",
             sender_ip,
+            sender_device_id,
         )
+        payload: dict[str, Any] = {"raw_message": raw_message, "sender_ip": sender_ip}
+        if sender_device_id:
+            payload["sender_device_id"] = sender_device_id
         last_exc: Exception | None = None
         for attempt in range(1, _MAX_RETRIES + 1):
             try:
                 async with self._session.post(
                     "/api/lab_analyzer_device/communication/receive_result/",
                     headers=self._headers(),
-                    json={"raw_message": raw_message, "sender_ip": sender_ip},
+                    json=payload,
                 ) as resp:
                     if resp.status in (502, 503, 504):
                         body = await resp.text()
@@ -139,6 +155,8 @@ class CareClient:
         sample_ids: list[str],
         message_control_id: str | None = None,
         raw_message: str | None = None,
+        *,
+        sender_device_id: str | None = None,
     ) -> dict[str, Any]:
         """Fetch pending orders from CARE for query-based analyzers.
 
@@ -159,6 +177,8 @@ class CareClient:
             payload["message_control_id"] = message_control_id
         if raw_message:
             payload["raw_message"] = raw_message
+        if sender_device_id:
+            payload["sender_device_id"] = sender_device_id
 
         async with self._session.post(
             "/api/lab_analyzer_device/communication/pending_orders/",

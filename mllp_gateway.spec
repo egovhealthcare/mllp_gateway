@@ -10,7 +10,7 @@ for pkg in ["aiohttp", "multidict", "yarl", "frozenlist", "cryptography", "PIL"]
     binaries += collect_dynamic_libs(pkg)
 
 # Pure Python
-for pkg in ["aiosignal", "aiohappyeyeballs", "hl7", "joserfc", "tomli_w", "six", "pystray"]:
+for pkg in ["aiosignal", "aiohappyeyeballs", "hl7", "joserfc", "tomli_w", "six", "pystray", "serial", "serial_asyncio"]:
     hiddenimports += collect_submodules(pkg)
 
 # Platform-specific pystray backends

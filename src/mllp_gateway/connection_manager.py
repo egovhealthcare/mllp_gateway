@@ -177,24 +177,33 @@ class ConnectionManager:
         """Return configured devices with their connection status."""
         result = []
         for dev in self._configured_devices:
-            ip = dev.get("endpoint_address")
-            connected = ip is not None and (ip in self._oru or ip in self._orm)
+            key = self._device_key(dev)
+            connected = key is not None and (key in self._oru or key in self._orm)
             result.append({
                 **dev,
                 "connected": connected,
-                "oru_connected": ip in self._oru if ip else False,
-                "orm_connected": ip in self._orm if ip else False,
+                "oru_connected": key in self._oru if key else False,
+                "orm_connected": key in self._orm if key else False,
             })
         return result
 
+    @staticmethod
+    def _device_key(dev: dict[str, Any]) -> str | None:
+        """Connection key for a configured device.
+
+        Ethernet devices are tracked by ``endpoint_address`` (IP); serial
+        devices have no IP and are tracked by ``connection_key`` (their id).
+        """
+        return dev.get("connection_key") or dev.get("endpoint_address")
+
     @property
     def all_configured_connected(self) -> bool:
-        """True if every configured device with an endpoint_address is connected."""
+        """True if every configured device is connected."""
         if not self._configured_devices:
             return True
         for dev in self._configured_devices:
-            ip = dev.get("endpoint_address")
-            if ip and ip not in self._oru and ip not in self._orm:
+            key = self._device_key(dev)
+            if key and key not in self._oru and key not in self._orm:
                 return False
         return True
 
@@ -203,8 +212,8 @@ class ConnectionManager:
         """Count of configured devices that are currently connected."""
         count = 0
         for dev in self._configured_devices:
-            ip = dev.get("endpoint_address")
-            if ip and (ip in self._oru or ip in self._orm):
+            key = self._device_key(dev)
+            if key and (key in self._oru or key in self._orm):
                 count += 1
         return count
 
