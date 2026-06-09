@@ -16,6 +16,18 @@
       </a>
     </div>
     <div class="header-right">
+      <button class="header-btn" id="btnRefreshDevices" title="Refresh devices list from CARE">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+        <span>Refresh Devices</span>
+      </button>
+      <button class="header-btn" id="btnRestart" title="Restart the gateway process">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>
+        <span>Restart</span>
+      </button>
+      <button class="header-btn header-btn-danger" id="btnExit" title="Shut down the gateway">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/></svg>
+        <span>Exit</span>
+      </button>
       <span class="ws-status" id="wsStatus">
         <span class="ws-dot"></span>
         <span class="ws-label" id="wsLabel">Connecting&hellip;</span>

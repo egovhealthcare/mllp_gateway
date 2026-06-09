@@ -8,31 +8,22 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 
 import hl7
-import hl7.mllp
 
 from mllp_gateway.connection_manager import ConnectionManager
 from mllp_gateway.message_store import MessageStore
 from mllp_gateway.mllp.common import validate_hl7
+from mllp_gateway.mllp.framing import MllpConnection, start_server
 
 logger = logging.getLogger(__name__)
 
-# Signature: (raw_message, peer_ip) -> None
 ForwardCallback = Callable[[str, str], Awaitable[None]]
 
-# Signature: (msg, peer_ip, writer) -> None
-WorklistHandler = Callable[
-    [hl7.Message, str, hl7.mllp.HL7StreamWriter], Awaitable[None]
-]
+WorklistHandler = Callable[[hl7.Message, str, MllpConnection], Awaitable[None]]
 
 _FORWARD_QUEUE_SIZE = 1000
 
 MAX_RETRIES = 3
-RETRY_BACKOFF_BASE = 2  # seconds — exponential: 2, 4, 8
-
-
-def _peer_ip(writer: hl7.mllp.HL7StreamWriter) -> str:
-    peername = writer.get_extra_info("peername")
-    return peername[0] if peername else "unknown"
+RETRY_BACKOFF_BASE = 2
 
 
 def _get_message_type(msg: hl7.Message) -> str:
@@ -61,27 +52,23 @@ async def start_oru_server(
     (supports single-port analyzers like ADX AutoChem 200).
     """
 
-    async def handler(
-        reader: hl7.mllp.HL7StreamReader, writer: hl7.mllp.HL7StreamWriter
-    ):
+    async def handler(conn: MllpConnection) -> None:
         await serve_oru_connection(
-            reader,
-            writer,
-            _peer_ip(writer),
+            conn,
+            conn.peer,
             connections,
             forward,
             store,
             worklist_handler=worklist_handler,
         )
 
-    server = await hl7.mllp.start_hl7_server(handler, host=host, port=port)
+    server = await start_server(handler, host, port)
     logger.info("MLLP ORU listening on %s:%d", host, port)
     return server
 
 
 async def serve_oru_connection(
-    reader: hl7.mllp.HL7StreamReader,
-    writer: hl7.mllp.HL7StreamWriter,
+    conn: MllpConnection,
     peer_id: str,
     connections: ConnectionManager,
     forward: ForwardCallback,
@@ -91,31 +78,39 @@ async def serve_oru_connection(
     """Serve a single ORU (result) link until it closes.
 
     Shared by the TCP listener (one call per inbound connection) and the
-    serial runner (one call per opened serial link). *peer_id* identifies the
-    device for connection tracking and message tagging — an IP for Ethernet,
-    the device's connection key for serial.
+    serial/outbound runners. *peer_id* identifies the device for connection
+    tracking and message tagging — an IP for Ethernet, the device's
+    connection key for serial.
     """
     ip = peer_id
     logger.info("ORU connection from %s", ip)
-    connections.register_oru(ip, reader, writer)
+    connections.register_oru(ip, conn)
 
     queue: asyncio.Queue[tuple[int, str] | None] = asyncio.Queue(maxsize=_FORWARD_QUEUE_SIZE)
     worker = asyncio.create_task(_forward_worker(ip, queue, forward, store))
 
     try:
-        while True:
-            msg = await reader.readmessage()
+        while not conn.at_eof:
+            try:
+                msg = await conn.read_message()
+            except asyncio.LimitOverrunError:
+                logger.warning("MLLP frame exceeded buffer limit from %s", ip)
+                continue
+            except asyncio.IncompleteReadError:
+                break
+            except Exception as e:
+                logger.warning("Error reading HL7 from %s: %s", ip, e)
+                continue
+
             connections.record_activity(ip)
             msg_type = _get_message_type(msg)
             logger.info("[DEVICE <--] Received %s from %s (ORU connection)", msg_type or "message", ip)
 
-            # Shared-mode ORM ACK: a future is waiting for the device's response
             fut = connections.pop_oru_response_future(ip)
             if fut is not None and not fut.done():
                 fut.set_result(msg)
                 continue
 
-            # Route worklist queries to handler (single-port analyzers)
             if msg_type in ("ORM^O01", "QRY^Q02") and worklist_handler is not None:
                 raw = str(msg).replace("\r", "\n")
                 await store.insert(
@@ -126,11 +121,10 @@ async def serve_oru_connection(
                     time=datetime.now(timezone.utc).isoformat(),
                     forwarded=1,
                 )
-                await worklist_handler(msg, ip, writer)
+                await worklist_handler(msg, ip, conn)
                 logger.info("[DEVICE -->] Sent worklist response to %s (ORU connection)", ip)
                 continue
 
-            # Non-result messages (ACK^Q03, etc.) — store but don't forward
             if not msg_type.startswith("ORU"):
                 raw = str(msg).replace("\r", "\n")
                 await store.insert(
@@ -145,8 +139,7 @@ async def serve_oru_connection(
                 continue
 
             ack = msg.create_ack()
-            writer.writemessage(ack)
-            await writer.drain()
+            await conn.send_message(ack)
             logger.info("[DEVICE -->] Sent ACK to %s (ORU connection)", ip)
             raw = str(msg).replace("\r", "\n")
             ack_text = str(ack).replace("\r", "\n")
@@ -166,8 +159,6 @@ async def serve_oru_connection(
                 time=datetime.now(timezone.utc).isoformat(),
             )
 
-            # Non-blocking put: if queue is full, the retry worker will
-            # pick it up from the store later
             try:
                 queue.put_nowait((row["id"], raw))
             except asyncio.QueueFull:
@@ -189,9 +180,9 @@ async def serve_oru_connection(
         except Exception:
             pass
         connections.unregister_oru(ip)
-        writer.close()
+        conn.close()
         try:
-            await writer.wait_closed()
+            await conn.wait_closed()
         except Exception:
             pass
 
@@ -203,23 +194,27 @@ async def start_orm_server(
     store: MessageStore,
     worklist_handler: WorklistHandler | None = None,
 ) -> asyncio.Server:
-    """Start the MLLP server that accepts ORM (order) connections from analyzers.
+    """Start the MLLP server that accepts ORM (order) connections from analyzers."""
 
-    Inbound messages are either ACKs to orders we sent (placed on response
-    queue for send_order) or ORM^O01 worklist queries from the analyzer.
-    """
-
-    async def handler(
-        reader: hl7.mllp.HL7StreamReader, writer: hl7.mllp.HL7StreamWriter
-    ):
-        ip = _peer_ip(writer)
+    async def handler(conn: MllpConnection) -> None:
+        ip = conn.peer
         logger.info("ORM connection from %s", ip)
-        connections.register_orm(ip, reader, writer)
+        connections.register_orm(ip, conn)
         queue = connections.get_orm_response_queue(ip)
 
         try:
-            while True:
-                msg = await reader.readmessage()
+            while not conn.at_eof:
+                try:
+                    msg = await conn.read_message()
+                except asyncio.LimitOverrunError:
+                    logger.warning("MLLP frame exceeded buffer limit from %s", ip)
+                    continue
+                except asyncio.IncompleteReadError:
+                    break
+                except Exception as e:
+                    logger.warning("Error reading HL7 from %s: %s", ip, e)
+                    continue
+
                 connections.record_activity(ip)
 
                 msg_type = _get_message_type(msg)
@@ -234,7 +229,7 @@ async def start_orm_server(
                         time=datetime.now(timezone.utc).isoformat(),
                         forwarded=1,
                     )
-                    await worklist_handler(msg, ip, writer)
+                    await worklist_handler(msg, ip, conn)
                     logger.info("[DEVICE -->] Sent worklist response to %s (ORM connection)", ip)
                 elif queue is not None:
                     await queue.put(msg)
@@ -246,13 +241,8 @@ async def start_orm_server(
             logger.error("ORM handler error (%s): %s", ip, e)
         finally:
             connections.unregister_orm(ip)
-            writer.close()
-            try:
-                await writer.writer.wait_closed()
-            except Exception:
-                pass
 
-    server = await hl7.mllp.start_hl7_server(handler, host=host, port=port)
+    server = await start_server(handler, host, port)
     logger.info("MLLP ORM listening on %s:%d", host, port)
     return server
 

@@ -1,5 +1,6 @@
 """HTTP middleware for the CARE-facing API: CORS, auth, and request logging."""
 
+import asyncio
 import logging
 
 from aiohttp import web
@@ -55,7 +56,8 @@ async def auth_middleware(request: web.Request, handler) -> web.StreamResponse:
 
     token = header.removeprefix("Care_Bearer ")
     try:
-        auth.verify_care_token(token)
+        # JWKS fetch uses blocking urllib — keep it off the event loop.
+        await asyncio.to_thread(auth.verify_care_token, token)
     except Exception as e:
         logger.warning("Auth failed: %s", e)
         return web.json_response({"error": "invalid token"}, status=401)

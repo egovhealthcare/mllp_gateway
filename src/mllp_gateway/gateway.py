@@ -23,6 +23,7 @@ from mllp_gateway.connection_manager import ConnectionManager
 from mllp_gateway.device_runner import run_configured_devices
 from mllp_gateway.message_store import MessageStore
 from mllp_gateway.mllp import start_orm_server, start_oru_server
+from mllp_gateway.mllp.framing import MllpConnection
 from mllp_gateway.mllp.worklist import (
     build_orr_error_response,
     build_qck_error_response,
@@ -129,23 +130,21 @@ def _extract_sample_ids(msg: hl7.Message, msg_type: str) -> list[str]:
 
 
 async def _send_hl7_response(
-    writer: hl7.mllp.HL7StreamWriter, response: str | list[str]
+    conn: MllpConnection, response: str | list[str]
 ) -> None:
-    """Write one or more HL7 messages to the MLLP writer."""
+    """Write one or more HL7 messages to the MLLP connection."""
     if isinstance(response, list):
         for msg_str in response:
-            writer.writemessage(hl7.parse(msg_str))
-            await writer.drain()
+            await conn.send_message(hl7.parse(msg_str))
     else:
-        writer.writemessage(hl7.parse(response))
-        await writer.drain()
+        await conn.send_message(hl7.parse(response))
 
 
 async def _handle_worklist_query(
     care: CareClient,
     msg: hl7.Message,
     peer_ip: str,
-    writer: hl7.mllp.HL7StreamWriter,
+    conn: MllpConnection,
 ) -> None:
     """Handle a worklist query (ORM^O01 or QRY^Q02) from a lab analyzer.
 
@@ -172,20 +171,19 @@ async def _handle_worklist_query(
                 if msg_type == "QRY^Q02"
                 else build_orr_error_response(control_id)
             )
-            await _send_hl7_response(writer, error_response)
+            await _send_hl7_response(conn, error_response)
             return
 
         raw_hl7_response = result.get("raw_hl7_response")
         if raw_hl7_response:
-            await _send_hl7_response(writer, raw_hl7_response)
+            await _send_hl7_response(conn, raw_hl7_response)
         else:
-            # Backend didn't build a response — send error acknowledgement
             error_response = (
                 build_qck_error_response(control_id)
                 if msg_type == "QRY^Q02"
                 else build_orr_error_response(control_id)
             )
-            await _send_hl7_response(writer, error_response)
+            await _send_hl7_response(conn, error_response)
     except Exception as e:
         logger.error("Worklist query handler error for %s: %s", peer_ip, e)
 
@@ -194,6 +192,8 @@ async def run_gateway(
     config: Config,
     stop_event: asyncio.Event,
     *,
+    on_restart: Callable[[], None] | None = None,
+    on_exit: Callable[[], None] | None = None,
     on_update_available: Callable | None = None,
     on_tunnel_started: Callable[[], None] | None = None,
     on_connections_changed: Callable[[int], None] | None = None,
@@ -218,9 +218,9 @@ async def run_gateway(
     await care.start()
 
     async def worklist_handler(
-        msg: hl7.Message, peer_ip: str, writer: hl7.mllp.HL7StreamWriter
+        msg: hl7.Message, peer_ip: str, conn: MllpConnection
     ) -> None:
-        await _handle_worklist_query(care, msg, peer_ip, writer)
+        await _handle_worklist_query(care, msg, peer_ip, conn)
 
     oru_server = await start_oru_server(
         "0.0.0.0", config.oru_port, connections, care.forward_result, store,
@@ -239,7 +239,13 @@ async def run_gateway(
     await site.start()
 
     # Localhost-only web UI
-    ui_app = create_ui_app(store, connections)
+    ui_app = create_ui_app(
+        store,
+        connections,
+        on_restart=on_restart,
+        on_exit=on_exit,
+        on_refresh_devices=lambda: _fetch_and_apply_devices("web UI"),
+    )
     ui_runner = web.AppRunner(ui_app, access_log=None)
     await ui_runner.setup()
     ui_site = web.TCPSite(ui_runner, "127.0.0.1", config.ui_port)
@@ -268,35 +274,26 @@ async def run_gateway(
 
     device_tasks: list[asyncio.Task] = []
 
-    def _apply_configured_devices(raw_devices: list[dict]) -> None:
-        """Register devices for status tracking and start their runners.
+    async def _fetch_and_apply_devices(label: str = "") -> int:
+        """Fetch configured devices from CARE, register them, and start runners.
 
-        Ethernet + HL7 devices use the shared MLLP listeners; serial and ASTM
-        devices each get a dedicated runner task.
+        Returns the number of devices loaded (0 on failure).
         """
+        raw_devices = await care.fetch_configured_devices()
+        if not raw_devices:
+            return 0
         device_configs = parse_device_configs(raw_devices)
-        enriched = []
-        for cfg in device_configs:
-            raw = dict(cfg.raw)
-            raw["connection_key"] = cfg.connection_key
-            enriched.append(raw)
-        connections.set_configured_devices(enriched)
+        connections.set_configured_devices(device_configs)
         device_tasks.extend(
             run_configured_devices(
-                device_configs,
-                connections,
-                care,
-                store,
-                worklist_handler,
-                stop_event,
+                device_configs, connections, care, store,
+                worklist_handler, stop_event,
             )
         )
+        logger.info("Loaded %d configured devices from CARE%s", len(device_configs), f" ({label})" if label else "")
+        return len(device_configs)
 
-    configured_devices = await care.fetch_configured_devices()
-    if configured_devices:
-        logger.info("Loaded %d configured devices from CARE", len(configured_devices))
-        _apply_configured_devices(configured_devices)
-    else:
+    if not await _fetch_and_apply_devices():
         logger.warning("No configured devices fetched from CARE (will retry periodically)")
 
     tasks = [
@@ -346,22 +343,19 @@ async def run_gateway(
 
         tasks.append(asyncio.create_task(_report_care_api()))
 
-    # Periodically retry fetching configured devices until successful
-    async def _refresh_configured_devices():
+    async def _retry_fetch_devices():
+        """Periodically retry fetching configured devices until successful."""
         while not stop_event.is_set():
             if connections.configured_devices:
-                return  # Already have devices, no need to retry
+                return
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=_CARE_PING_INTERVAL)
                 return
             except asyncio.TimeoutError:
                 pass
-            devices = await care.fetch_configured_devices()
-            if devices:
-                _apply_configured_devices(devices)
-                logger.info("Loaded %d configured devices from CARE (retry)", len(devices))
+            await _fetch_and_apply_devices("retry")
 
-    tasks.append(asyncio.create_task(_refresh_configured_devices()))
+    tasks.append(asyncio.create_task(_retry_fetch_devices()))
 
     await stop_event.wait()
     logger.info("Shutting down")
@@ -387,6 +381,12 @@ def run_headless(config: Config) -> None:
     """Run the gateway without a system tray (suitable for services / SSH)."""
     loop = asyncio.new_event_loop()
     stop = asyncio.Event()
+    restart_requested = False
+
+    def request_restart():
+        nonlocal restart_requested
+        restart_requested = True
+        stop.set()
 
     if sys.platform != "win32":
         loop.add_signal_handler(signal.SIGINT, stop.set)
@@ -396,9 +396,14 @@ def run_headless(config: Config) -> None:
         signal.signal(signal.SIGTERM, lambda *_: loop.call_soon_threadsafe(stop.set))
 
     try:
-        loop.run_until_complete(run_gateway(config, stop))
+        loop.run_until_complete(
+            run_gateway(config, stop, on_restart=request_restart, on_exit=stop.set)
+        )
     finally:
         loop.close()
+
+    if restart_requested:
+        restart_process()
 
 
 def run_with_tray(config: Config) -> None:
@@ -454,6 +459,8 @@ def run_with_tray(config: Config) -> None:
             await run_gateway(
                 config,
                 stop,
+                on_restart=request_restart,
+                on_exit=lambda: loop.call_soon_threadsafe(stop.set),
                 on_update_available=tray.update_available,
                 on_tunnel_started=lambda: tray.update_tunnel(True),
                 on_connections_changed=tray.update_connections,

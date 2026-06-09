@@ -1,24 +1,109 @@
-"""ORM (order) dispatch to lab analyzers over MLLP."""
+"""ORM dispatch and outbound MLLP client connections to lab analyzers."""
+
+from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import hl7
-import hl7.mllp
 
 from mllp_gateway.connection_manager import ConnectionManager
 from mllp_gateway.message_store import MessageStore
 from mllp_gateway.mllp.common import validate_hl7
+from mllp_gateway.mllp.framing import MllpConnection, open_connection
+from mllp_gateway.mllp.server import ForwardCallback, WorklistHandler, serve_oru_connection
 
 logger = logging.getLogger(__name__)
 
 ORM_MODES = frozenset({"shared", "server", "client"})
 
-# Default timeout for waiting on a device response (seconds).
-# Some analyzers are slow; this should be generous.
 DEFAULT_ORM_TIMEOUT = 30
+
+DEFAULT_CONNECT_TIMEOUT = 10
+
+
+async def serve_outbound_hl7_connection(
+    host: str,
+    port: int,
+    peer_id: str,
+    connections: ConnectionManager,
+    forward: ForwardCallback,
+    store: MessageStore,
+    worklist_handler: WorklistHandler | None = None,
+    connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
+) -> None:
+    """Dial an analyzer and serve its ORU/worklist traffic until disconnect.
+
+    Used for devices like the Mindray BC-5150 that listen on a fixed port
+    (5100) while the gateway maintains the persistent outbound connection.
+    """
+    conn = await open_connection(host, port, timeout=connect_timeout)
+    logger.info("Outbound HL7 connected to %s:%d", host, port)
+    try:
+        await serve_oru_connection(
+            conn,
+            peer_id,
+            connections,
+            forward,
+            store,
+            worklist_handler=worklist_handler,
+        )
+    finally:
+        conn.close()
+        try:
+            await conn.wait_closed()
+        except Exception:
+            pass
+
+
+async def run_outbound_hl7_device(
+    device_id: str,
+    host: str,
+    port: int,
+    peer_id: str,
+    connections: ConnectionManager,
+    forward: Callable[[str, str, str], Awaitable[None]],
+    store: MessageStore,
+    worklist_handler: WorklistHandler | None,
+    stop_event: asyncio.Event,
+    reconnect_backoff_base: float = 2,
+    reconnect_backoff_max: float = 60,
+) -> None:
+    """Maintain a persistent outbound MLLP session with reconnect backoff."""
+
+    async def forward_with_id(raw_message: str, peer: str) -> None:
+        await forward(raw_message, peer, device_id)
+
+    attempt = 0
+    while not stop_event.is_set():
+        try:
+            await serve_outbound_hl7_connection(
+                host,
+                port,
+                peer_id,
+                connections,
+                forward_with_id,
+                store,
+                worklist_handler=worklist_handler,
+            )
+            attempt = 0
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Outbound HL7 link error for %s:%d: %s", host, port, e)
+        if stop_event.is_set():
+            return
+        attempt += 1
+        delay = min(reconnect_backoff_base * attempt, reconnect_backoff_max)
+        logger.info("Reconnecting outbound HL7 to %s:%d in %ds", host, port, delay)
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=delay)
+            return
+        except asyncio.TimeoutError:
+            pass
 
 
 async def send_order(
@@ -33,12 +118,9 @@ async def send_order(
 
     Delivery strategy depends on *orm_mode*:
 
-    - **shared**: piggyback on the existing ORU connection. A future is
-      registered so the ORU handler resolves it with the device’s response.
+    - **shared**: piggyback on the existing ORU connection.
     - **server**: use the dedicated ORM connection the device opened.
     - **client**: open a new TCP connection to ``device_ip:port``.
-
-    If *shared* has no active ORU connection, falls through to *client*.
     """
     if orm_mode not in ORM_MODES:
         raise ValueError(
@@ -50,19 +132,14 @@ async def send_order(
         raise ValueError(validation_err)
 
     if orm_mode == "shared":
-        # Shared mode: piggyback on the existing ORU connection to send ORM.
-        # A future is registered so the ORU server handler knows the next
-        # inbound message is the ORM ACK (not a new result). The future is
-        # resolved by the ORU handler when the device responds.
-        writer = connections.get_oru_writer(device_ip)
+        conn = connections.get_oru_conn(device_ip)
         lock = connections.get_oru_send_lock(device_ip)
-        if writer and lock:
+        if conn and lock:
             async with lock:
                 fut = asyncio.get_running_loop().create_future()
                 connections.set_oru_response_future(device_ip, fut)
                 try:
-                    writer.writemessage(hl7.parse(raw_hl7_message))
-                    await writer.drain()
+                    await conn.send_message(hl7.parse(raw_hl7_message))
                     return str(await asyncio.wait_for(fut, timeout=timeout))
                 except asyncio.TimeoutError:
                     raise TimeoutError(
@@ -76,15 +153,14 @@ async def send_order(
         )
 
     elif orm_mode == "server":
-        writer = connections.get_orm_writer(device_ip)
+        conn = connections.get_orm_conn(device_ip)
         queue = connections.get_orm_response_queue(device_ip)
-        if not (writer and queue):
+        if not (conn and queue):
             raise ConnectionError(
                 f"No ORM connection from {device_ip}. "
                 "The analyzer must initiate a dedicated ORM connection to use 'server' mode."
             )
-        writer.writemessage(hl7.parse(raw_hl7_message))
-        await writer.drain()
+        await conn.send_message(hl7.parse(raw_hl7_message))
         try:
             response = await asyncio.wait_for(queue.get(), timeout=timeout)
         except asyncio.TimeoutError:
@@ -94,28 +170,12 @@ async def send_order(
             )
         return str(response)
 
-    # "client" mode or "shared" fallback: open a new TCP connection to the device
+    # "client" mode or "shared" fallback
+    conn = await open_connection(device_ip, port)
     try:
-        reader, writer = await asyncio.wait_for(
-            hl7.mllp.open_hl7_connection(device_ip, port),
-            timeout=10,
-        )
-    except asyncio.TimeoutError:
-        raise ConnectionError(
-            f"Could not connect to {device_ip}:{port} within 10s. "
-            "Verify the analyzer is listening and the port is correct."
-        )
-    except OSError as e:
-        raise ConnectionError(
-            f"Connection refused by {device_ip}:{port}: {e}. "
-            "Verify the analyzer is powered on and accepting connections."
-        )
-
-    try:
-        writer.writemessage(hl7.parse(raw_hl7_message))
-        await writer.drain()
+        await conn.send_message(hl7.parse(raw_hl7_message))
         try:
-            response = await asyncio.wait_for(reader.readmessage(), timeout=timeout)
+            response = await asyncio.wait_for(conn.read_message(), timeout=timeout)
         except asyncio.TimeoutError:
             raise TimeoutError(
                 f"Device {device_ip}:{port} did not respond within {timeout}s in client mode. "
@@ -123,9 +183,9 @@ async def send_order(
             )
         return str(response)
     finally:
-        writer.close()
+        conn.close()
         try:
-            await writer.writer.wait_closed()
+            await conn.wait_closed()
         except Exception:
             pass
 

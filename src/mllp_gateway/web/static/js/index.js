@@ -486,6 +486,53 @@ async function loadInitial() {
   refreshConfiguredDevices();
 }
 
+// -------------------------------------------------------------------
+// Header action buttons
+// -------------------------------------------------------------------
+
+document.getElementById("btnRefreshDevices").addEventListener("click", async () => {
+  const btn = document.getElementById("btnRefreshDevices");
+  btn.disabled = true;
+  try {
+    const resp = await wsRequest("refresh_devices");
+    if (resp.data.ok) {
+      refreshConfiguredDevices();
+      refreshConnections();
+      refreshStats();
+    } else {
+      alert("Refresh failed: " + (resp.data.error || "unknown error"));
+    }
+  } catch (err) {
+    alert("Refresh failed: " + err.message);
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+document.getElementById("btnRestart").addEventListener("click", async () => {
+  if (!confirm("Restart the gateway? Active connections will be dropped.")) return;
+  const btn = document.getElementById("btnRestart");
+  btn.disabled = true;
+  try {
+    await wsRequest("restart");
+  } catch (_) {}
+  btn.textContent = "Restarting\u2026";
+});
+
+document.getElementById("btnExit").addEventListener("click", async () => {
+  if (!confirm("Shut down the gateway? All connections will be closed.")) return;
+  const btn = document.getElementById("btnExit");
+  btn.disabled = true;
+  try {
+    await wsRequest("exit");
+  } catch (_) {}
+  btn.textContent = "Shutting down\u2026";
+});
+
+// -------------------------------------------------------------------
+// Bootstrap
+// -------------------------------------------------------------------
+
 // connectWS triggers loadInitial once connected
 connectWS();
 

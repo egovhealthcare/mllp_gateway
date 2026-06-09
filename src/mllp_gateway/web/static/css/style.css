@@ -63,12 +63,50 @@ a:hover { text-decoration: underline; }
 .logo svg { color: var(--accent-cyan); }
 .logo:hover { text-decoration: none; opacity: 0.9; }
 
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.header-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.35rem 0.7rem;
+  border: 1px solid var(--border-bright);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  white-space: nowrap;
+}
+.header-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  border-color: var(--text-muted);
+}
+.header-btn:active { transform: scale(0.97); }
+.header-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.header-btn-danger:hover {
+  border-color: var(--accent-red);
+  color: var(--accent-red);
+}
+.header-btn svg { flex-shrink: 0; }
+
 .ws-status {
   display: flex;
   align-items: center;
   gap: 0.4rem;
   font-size: 0.8rem;
   color: var(--text-secondary);
+  margin-left: 0.25rem;
 }
 .ws-dot {
   width: 8px;

@@ -21,9 +21,11 @@ logger = logging.getLogger(__name__)
 
 Transport = Literal["ethernet", "serial"]
 Protocol = Literal["hl7", "astm"]
+Hl7ConnectionMode = Literal["inbound", "outbound"]
 
 _VALID_TRANSPORTS: frozenset[str] = frozenset({"ethernet", "serial"})
 _VALID_PROTOCOLS: frozenset[str] = frozenset({"hl7", "astm"})
+_VALID_HL7_CONNECTION_MODES: frozenset[str] = frozenset({"inbound", "outbound"})
 
 # pyserial parity/stopbit string constants accepted from CARE config.
 _PARITY_MAP = {"N": "N", "E": "E", "O": "O", "M": "M", "S": "S"}
@@ -74,6 +76,7 @@ class DeviceConfig:
     oru_port: int = 2575
     orm_port: int | None = None
     orm_mode: str = "shared"
+    hl7_connection_mode: Hl7ConnectionMode = "inbound"
     # Serial fields
     serial: SerialSettings | None = None
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
@@ -93,6 +96,15 @@ class DeviceConfig:
     def is_astm(self) -> bool:
         return self.protocol == "astm"
 
+    @property
+    def is_outbound_hl7(self) -> bool:
+        """True when the gateway must dial out to the analyzer over MLLP."""
+        return (
+            self.transport == "ethernet"
+            and self.protocol == "hl7"
+            and self.hl7_connection_mode == "outbound"
+        )
+
 
 def _coerce_transport(value: Any) -> Transport:
     text = str(value or "ethernet").lower()
@@ -108,6 +120,14 @@ def _coerce_protocol(value: Any) -> Protocol:
         logger.warning("Unknown protocol %r, defaulting to 'hl7'", value)
         return "hl7"
     return cast(Protocol, text)
+
+
+def _coerce_hl7_connection_mode(value: Any) -> Hl7ConnectionMode:
+    text = str(value or "inbound").lower()
+    if text not in _VALID_HL7_CONNECTION_MODES:
+        logger.warning("Unknown hl7_connection_mode %r, defaulting to 'inbound'", value)
+        return "inbound"
+    return cast(Hl7ConnectionMode, text)
 
 
 def _parse_serial(raw: dict[str, Any]) -> SerialSettings | None:
@@ -142,17 +162,22 @@ def parse_device_config(raw: dict[str, Any]) -> DeviceConfig:
     """
     transport = _coerce_transport(raw.get("transport"))
     protocol = _coerce_protocol(raw.get("protocol"))
+    device_type = str(raw.get("type", "generic"))
     orm_port = raw.get("orm_port")
+    oru_port_raw = raw.get("oru_port")
+    oru_port = int(oru_port_raw if oru_port_raw is not None else 2575)
+    hl7_connection_mode = _coerce_hl7_connection_mode(raw.get("hl7_connection_mode"))
     return DeviceConfig(
         id=str(raw.get("id", "")),
         registered_name=str(raw.get("registered_name", "")),
         transport=transport,
         protocol=protocol,
-        type=str(raw.get("type", "generic")),
+        type=device_type,
         endpoint_address=raw.get("endpoint_address"),
-        oru_port=int(raw.get("oru_port", 2575) or 2575),
+        oru_port=oru_port,
         orm_port=int(orm_port) if orm_port else None,
         orm_mode=str(raw.get("orm_mode", "shared")),
+        hl7_connection_mode=hl7_connection_mode,
         serial=_parse_serial(raw) if transport == "serial" else None,
         raw=raw,
     )

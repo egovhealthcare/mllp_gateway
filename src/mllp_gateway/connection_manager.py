@@ -5,9 +5,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
-import hl7.mllp
+import hl7
+
+if TYPE_CHECKING:
+    from mllp_gateway.mllp.framing import MllpConnection
+    from mllp_gateway.transport.device import DeviceConfig
 
 __all__ = ["ConnectionManager", "IDLE_THRESHOLD_SECONDS"]
 
@@ -17,24 +21,22 @@ IDLE_THRESHOLD_SECONDS = 300
 
 
 class Connection(NamedTuple):
-    reader: hl7.mllp.HL7StreamReader
-    writer: hl7.mllp.HL7StreamWriter
+    conn: MllpConnection
     connected_at: float
 
 
 class ORMConnection(NamedTuple):
-    reader: hl7.mllp.HL7StreamReader
-    writer: hl7.mllp.HL7StreamWriter
+    conn: MllpConnection
     response_queue: asyncio.Queue
     connected_at: float
 
 
 class ConnectionManager:
-    """Tracks active ORU/ORM device connections by IP.
+    """Tracks active ORU/ORM device connections by IP or connection key.
 
     Devices connect via two MLLP channels:
-    - ORU (results): device → gateway, always device-initiated.
-    - ORM (orders): gateway → device via shared, server, or client mode.
+    - ORU (results): device -> gateway, always device-initiated.
+    - ORM (orders): gateway -> device via shared, server, or client mode.
 
     For shared mode, a temporary Future is registered so the ORU handler
     knows the next inbound message is an ORM ACK rather than a new result.
@@ -46,29 +48,23 @@ class ConnectionManager:
         self._oru_send_lock: dict[str, asyncio.Lock] = {}
         self._oru_response_future: dict[str, asyncio.Future[hl7.Message]] = {}
         self._last_activity: dict[str, float] = {}
-        self._configured_devices: list[dict[str, Any]] = []
+        self._configured_devices: list[DeviceConfig] = []
 
-    def _close_writer(self, writer: hl7.mllp.HL7StreamWriter) -> None:
-        """Close a writer silently, ignoring errors on already-closed sockets."""
+    @staticmethod
+    def _close_conn(conn: MllpConnection) -> None:
         try:
-            writer.close()
+            conn.close()
         except Exception:
             pass
 
-    def register_oru(
-        self,
-        ip: str,
-        reader: hl7.mllp.HL7StreamReader,
-        writer: hl7.mllp.HL7StreamWriter,
-    ) -> None:
-        """Register a new ORU connection, closing any stale one from the same IP."""
-        # Close stale connection from same IP if it exists
+    def register_oru(self, ip: str, conn: MllpConnection) -> None:
+        """Register a new ORU connection, closing any stale one from the same key."""
         old = self._oru.get(ip)
         if old is not None:
             logger.warning("ORU reconnect from %s — closing previous connection", ip)
-            self._close_writer(old.writer)
+            self._close_conn(old.conn)
 
-        self._oru[ip] = Connection(reader, writer, time.monotonic())
+        self._oru[ip] = Connection(conn, time.monotonic())
         self._oru_send_lock.setdefault(ip, asyncio.Lock())
         self._last_activity[ip] = time.monotonic()
         logger.info("ORU connected: %s", ip)
@@ -84,9 +80,9 @@ class ConnectionManager:
         """Update the last-activity timestamp for a device."""
         self._last_activity[ip] = time.monotonic()
 
-    def get_oru_writer(self, ip: str) -> hl7.mllp.HL7StreamWriter | None:
-        conn = self._oru.get(ip)
-        return conn.writer if conn else None
+    def get_oru_conn(self, ip: str) -> MllpConnection | None:
+        entry = self._oru.get(ip)
+        return entry.conn if entry else None
 
     def get_oru_send_lock(self, ip: str) -> asyncio.Lock | None:
         return self._oru_send_lock.get(ip)
@@ -99,35 +95,26 @@ class ConnectionManager:
         """Remove and return the pending response future, or None."""
         return self._oru_response_future.pop(ip, None)
 
-    def register_orm(
-        self,
-        ip: str,
-        reader: hl7.mllp.HL7StreamReader,
-        writer: hl7.mllp.HL7StreamWriter,
-    ) -> None:
+    def register_orm(self, ip: str, conn: MllpConnection) -> None:
         old = self._orm.get(ip)
         if old is not None:
             logger.warning("ORM reconnect from %s — closing previous connection", ip)
-            self._close_writer(old.writer)
+            self._close_conn(old.conn)
 
-        self._orm[ip] = ORMConnection(reader, writer, asyncio.Queue(), time.monotonic())
+        self._orm[ip] = ORMConnection(conn, asyncio.Queue(), time.monotonic())
         self._last_activity[ip] = time.monotonic()
         logger.info("ORM connected: %s", ip)
 
     def unregister_orm(self, ip: str) -> None:
         self._orm.pop(ip, None)
 
-    def get_orm_writer(self, ip: str) -> hl7.mllp.HL7StreamWriter | None:
-        conn = self._orm.get(ip)
-        return conn.writer if conn else None
-
-    def get_orm_reader(self, ip: str) -> hl7.mllp.HL7StreamReader | None:
-        conn = self._orm.get(ip)
-        return conn.reader if conn else None
+    def get_orm_conn(self, ip: str) -> MllpConnection | None:
+        entry = self._orm.get(ip)
+        return entry.conn if entry else None
 
     def get_orm_response_queue(self, ip: str) -> asyncio.Queue | None:
-        conn = self._orm.get(ip)
-        return conn.response_queue if conn else None
+        entry = self._orm.get(ip)
+        return entry.response_queue if entry else None
 
     def is_connection_alive(self, ip: str) -> bool:
         """Check if a device has been active within the last 5 minutes."""
@@ -157,7 +144,6 @@ class ConnectionManager:
             modes.append("shared")
         if ip in self._orm:
             modes.append("server")
-        # "client" is always available if the user knows the device IP/port
         modes.append("client")
         return modes
 
@@ -165,59 +151,46 @@ class ConnectionManager:
     def device_count(self) -> int:
         return len(set(self._oru) | set(self._orm))
 
-    def set_configured_devices(self, devices: list[dict[str, Any]]) -> None:
+    def set_configured_devices(self, devices: list[DeviceConfig]) -> None:
         """Store the list of devices configured for this gateway in CARE."""
         self._configured_devices = devices
 
     @property
-    def configured_devices(self) -> list[dict[str, Any]]:
+    def configured_devices(self) -> list[DeviceConfig]:
         return self._configured_devices
+
+    def _is_connected(self, key: str) -> bool:
+        return key in self._oru or key in self._orm
 
     def get_configured_device_status(self) -> list[dict[str, Any]]:
         """Return configured devices with their connection status."""
         result = []
         for dev in self._configured_devices:
-            key = self._device_key(dev)
-            connected = key is not None and (key in self._oru or key in self._orm)
+            key = dev.connection_key
             result.append({
-                **dev,
-                "connected": connected,
-                "oru_connected": key in self._oru if key else False,
-                "orm_connected": key in self._orm if key else False,
+                **dev.raw,
+                "connection_key": key,
+                "connected": self._is_connected(key),
+                "oru_connected": key in self._oru,
+                "orm_connected": key in self._orm,
             })
         return result
-
-    @staticmethod
-    def _device_key(dev: dict[str, Any]) -> str | None:
-        """Connection key for a configured device.
-
-        Ethernet devices are tracked by ``endpoint_address`` (IP); serial
-        devices have no IP and are tracked by ``connection_key`` (their id).
-        """
-        return dev.get("connection_key") or dev.get("endpoint_address")
 
     @property
     def all_configured_connected(self) -> bool:
         """True if every configured device is connected."""
-        if not self._configured_devices:
-            return True
-        for dev in self._configured_devices:
-            key = self._device_key(dev)
-            if key and key not in self._oru and key not in self._orm:
-                return False
-        return True
+        return all(
+            self._is_connected(dev.connection_key)
+            for dev in self._configured_devices
+        ) if self._configured_devices else True
 
     @property
     def configured_connected_count(self) -> int:
-        """Count of configured devices that are currently connected."""
-        count = 0
-        for dev in self._configured_devices:
-            key = self._device_key(dev)
-            if key and (key in self._oru or key in self._orm):
-                count += 1
-        return count
+        return sum(
+            1 for dev in self._configured_devices
+            if self._is_connected(dev.connection_key)
+        )
 
     @property
     def configured_device_count(self) -> int:
-        """Total number of configured devices."""
         return len(self._configured_devices)

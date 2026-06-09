@@ -26,7 +26,8 @@ from mllp_gateway.astm import codec as astm_codec
 from mllp_gateway.care import CareClient
 from mllp_gateway.connection_manager import ConnectionManager
 from mllp_gateway.message_store import MessageStore
-from mllp_gateway.mllp import serve_oru_connection
+from mllp_gateway.mllp import run_outbound_hl7_device, serve_oru_connection
+from mllp_gateway.mllp.framing import MllpConnection
 from mllp_gateway.mllp.server import WorklistHandler
 from mllp_gateway.transport.device import DeviceConfig
 from mllp_gateway.transport.serial import (
@@ -59,12 +60,13 @@ def run_configured_devices(
 ) -> list[asyncio.Task]:
     """Spawn a runner task for each device that needs a dedicated link.
 
-    Ethernet + HL7 devices are skipped: they are handled by the shared MLLP
-    TCP listeners. Returns the list of created tasks.
+    Inbound Ethernet + HL7 devices are skipped — they connect to the shared
+    MLLP TCP listeners. Outbound Ethernet + HL7 devices (e.g. Mindray BC-5150)
+    get a dedicated dial-out runner. Returns the list of created tasks.
     """
     tasks: list[asyncio.Task] = []
     for device in devices:
-        if device.transport == "ethernet" and device.protocol == "hl7":
+        if device.transport == "ethernet" and device.protocol == "hl7" and not device.is_outbound_hl7:
             continue  # served by the shared MLLP TCP listeners
         tasks.append(
             asyncio.create_task(
@@ -94,13 +96,17 @@ async def _run_device(
     attempt = 0
     while not stop_event.is_set():
         try:
-            if device.is_serial and not device.is_astm:
+            if device.is_outbound_hl7:
+                await _run_outbound_hl7(
+                    device, connections, care, store, worklist_handler, stop_event
+                )
+            elif device.is_serial and not device.is_astm:
                 await _run_serial_hl7(
                     device, connections, care, store, worklist_handler, stop_event
                 )
             elif device.is_astm:
                 await _run_astm(device, connections, care, store, stop_event)
-            else:  # pragma: no cover — ethernet+hl7 is filtered out earlier
+            else:  # pragma: no cover — inbound ethernet+hl7 is filtered out earlier
                 return
             attempt = 0  # clean exit (link closed) — reset backoff
         except asyncio.CancelledError:
@@ -120,6 +126,40 @@ async def _run_device(
             return
 
 
+async def _run_outbound_hl7(
+    device: DeviceConfig,
+    connections: ConnectionManager,
+    care: CareClient,
+    store: MessageStore,
+    worklist_handler: WorklistHandler | None,
+    stop_event: asyncio.Event,
+) -> None:
+    """Dial out to an analyzer that listens as an MLLP server (e.g. BC-5150:5100)."""
+    if not device.endpoint_address:
+        logger.error(
+            "Outbound HL7 device %s has no endpoint_address", device.id
+        )
+        await _sleep_or_stop(stop_event, _RECONNECT_BACKOFF_MAX)
+        return
+
+    async def forward(raw_message: str, peer: str, sender_device_id: str) -> None:
+        await care.forward_result(raw_message, peer, sender_device_id=sender_device_id)
+
+    await run_outbound_hl7_device(
+        device_id=device.id,
+        host=device.endpoint_address,
+        port=device.oru_port,
+        peer_id=device.connection_key,
+        connections=connections,
+        forward=forward,
+        store=store,
+        worklist_handler=worklist_handler,
+        stop_event=stop_event,
+        reconnect_backoff_base=_RECONNECT_BACKOFF_BASE,
+        reconnect_backoff_max=_RECONNECT_BACKOFF_MAX,
+    )
+
+
 async def _run_serial_hl7(
     device: DeviceConfig,
     connections: ConnectionManager,
@@ -130,13 +170,10 @@ async def _run_serial_hl7(
 ) -> None:
     """Open an MLLP-framed HL7 serial link and serve it via the ORU handler."""
     assert device.serial is not None
-    reader, writer = await open_hl7_serial_connection(device.serial)
-    # Tag forwarded results with the device id so CARE can resolve a device
-    # that has no IP address.
+    conn = await open_hl7_serial_connection(device.serial)
     forward = partial(_forward_with_device_id, care, device.id)
     await serve_oru_connection(
-        reader,
-        writer,
+        conn,
         device.connection_key,
         connections,
         forward,
@@ -175,7 +212,8 @@ async def _run_astm(
         )
 
     session = ASTMSession(reader, writer, device.connection_key)
-    connections.register_oru(device.connection_key, reader, writer)
+    conn = MllpConnection(reader, writer)
+    connections.register_oru(device.connection_key, conn)
     try:
         while not stop_event.is_set():
             token = await session.wait_for_establishment(timeout=None)

@@ -1,8 +1,11 @@
 """Localhost-only web UI for viewing HL7 messages and connection status."""
 
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +17,8 @@ from mllp_gateway.message_store import MessageStore
 from mllp_gateway.mllp import ORM_MODES, dispatch_order
 
 logger = logging.getLogger(__name__)
+
+LifecycleCallback = Callable[[], Any]
 
 _WS_HEARTBEAT = 15  # seconds
 
@@ -50,9 +55,12 @@ async def _handle_message_detail(request: web.Request) -> web.Response:
 
 
 async def _ws_handle_request(
-    msg_data: dict[str, Any], store: MessageStore, connections: ConnectionManager
+    msg_data: dict[str, Any],
+    app: web.Application,
 ) -> dict[str, Any]:
     """Handle an incoming WS request and return a response dict."""
+    store: MessageStore = app["store"]
+    connections: ConnectionManager = app["connections"]
     req_type = msg_data.get("type", "")
     req_id = msg_data.get("id")
 
@@ -86,6 +94,15 @@ async def _ws_handle_request(
 
     if req_type == "send":
         return await _ws_handle_send(msg_data, store, connections, req_id)
+
+    if req_type == "refresh_devices":
+        return await _ws_handle_refresh_devices(req_id, app)
+
+    if req_type == "restart":
+        return await _ws_handle_lifecycle(req_id, app, "restart")
+
+    if req_type == "exit":
+        return await _ws_handle_lifecycle(req_id, app, "exit")
 
     return {
         "type": "error",
@@ -155,7 +172,6 @@ async def _handle_ws(request: web.Request) -> web.WebSocketResponse:
     await ws_resp.prepare(request)
 
     store: MessageStore = request.app["store"]
-    connections: ConnectionManager = request.app["connections"]
     queue = store.subscribe()
 
     async def _push_events():
@@ -182,7 +198,7 @@ async def _handle_ws(request: web.Request) -> web.WebSocketResponse:
                         _dumps({"type": "error", "data": {"error": "invalid JSON"}})
                     )
                     continue
-                resp = await _ws_handle_request(msg_data, store, connections)
+                resp = await _ws_handle_request(msg_data, request.app)
                 await ws_resp.send_str(_dumps(resp))
             elif ws_msg.type in (web.WSMsgType.ERROR, web.WSMsgType.CLOSE):
                 break
@@ -195,13 +211,51 @@ async def _handle_ws(request: web.Request) -> web.WebSocketResponse:
     return ws_resp
 
 
+async def _ws_handle_refresh_devices(
+    req_id: Any, app: web.Application
+) -> dict[str, Any]:
+    """Trigger a device list refresh from CARE."""
+    callback: LifecycleCallback | None = app.get("on_refresh_devices")
+    if not callback:
+        return {"type": "refresh_devices", "id": req_id, "data": {"error": "not available"}}
+    try:
+        count = await callback()
+        return {
+            "type": "refresh_devices",
+            "id": req_id,
+            "data": {"ok": True, "count": count},
+        }
+    except Exception as e:
+        logger.exception("refresh_devices failed")
+        return {"type": "refresh_devices", "id": req_id, "data": {"error": str(e)}}
+
+
+async def _ws_handle_lifecycle(
+    req_id: Any, app: web.Application, action: str
+) -> dict[str, Any]:
+    """Invoke the on_restart or on_exit callback provided by the gateway."""
+    callback: LifecycleCallback | None = app.get(f"on_{action}")
+    if not callback:
+        return {"type": action, "id": req_id, "data": {"error": "not available"}}
+    callback()
+    return {"type": action, "id": req_id, "data": {"ok": True}}
+
+
 def create_ui_app(
-    store: MessageStore, connections: ConnectionManager
+    store: MessageStore,
+    connections: ConnectionManager,
+    *,
+    on_restart: LifecycleCallback | None = None,
+    on_exit: LifecycleCallback | None = None,
+    on_refresh_devices: LifecycleCallback | None = None,
 ) -> web.Application:
     """Build the localhost-only aiohttp application for the web UI."""
     app = web.Application()
     app["store"] = store
     app["connections"] = connections
+    app["on_restart"] = on_restart
+    app["on_exit"] = on_exit
+    app["on_refresh_devices"] = on_refresh_devices
 
     app.router.add_get("/", _handle_index)
     app.router.add_get("/message/{id}", _handle_message_detail)
