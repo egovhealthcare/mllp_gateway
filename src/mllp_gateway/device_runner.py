@@ -293,6 +293,14 @@ async def _handle_astm_message(
                 line for line in response_text.replace("\r", "\n").split("\n") if line
             ]
             ok = await session.send_message(order_records)
+            await store.insert(
+                "sent",
+                message=response_text.replace("\r", "\n"),
+                status="success" if ok else "error",
+                peer=device.connection_key,
+                host=device.connection_key,
+                time=now,
+            )
             logger.info(
                 "[DEVICE -->] Sent ASTM worklist (%d records) to %s (ok=%s)",
                 len(order_records),

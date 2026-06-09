@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 from collections.abc import Callable
+from datetime import datetime, timezone
 
 from aiohttp import web
 
@@ -140,8 +141,30 @@ async def _send_hl7_response(
         await conn.send_message(hl7.parse(response))
 
 
+async def _store_sent_worklist_response(
+    store: MessageStore,
+    peer_ip: str,
+    response: str | list[str],
+    *,
+    status: str = "success",
+) -> None:
+    """Persist outbound worklist HL7 (ORR^O02, QCK^Q02, etc.) for the gateway UI."""
+    now = datetime.now(timezone.utc).isoformat()
+    messages = response if isinstance(response, list) else [response]
+    for msg_str in messages:
+        await store.insert(
+            "sent",
+            message=msg_str.replace("\r", "\n"),
+            status=status,
+            peer=peer_ip,
+            host=peer_ip,
+            time=now,
+        )
+
+
 async def _handle_worklist_query(
     care: CareClient,
+    store: MessageStore,
     msg: hl7.Message,
     peer_ip: str,
     conn: MllpConnection,
@@ -172,11 +195,15 @@ async def _handle_worklist_query(
                 else build_orr_error_response(control_id)
             )
             await _send_hl7_response(conn, error_response)
+            await _store_sent_worklist_response(
+                store, peer_ip, error_response, status="error"
+            )
             return
 
         raw_hl7_response = result.get("raw_hl7_response")
         if raw_hl7_response:
             await _send_hl7_response(conn, raw_hl7_response)
+            await _store_sent_worklist_response(store, peer_ip, raw_hl7_response)
         else:
             error_response = (
                 build_qck_error_response(control_id)
@@ -184,6 +211,9 @@ async def _handle_worklist_query(
                 else build_orr_error_response(control_id)
             )
             await _send_hl7_response(conn, error_response)
+            await _store_sent_worklist_response(
+                store, peer_ip, error_response, status="error"
+            )
     except Exception as e:
         logger.error("Worklist query handler error for %s: %s", peer_ip, e)
 
@@ -220,7 +250,7 @@ async def run_gateway(
     async def worklist_handler(
         msg: hl7.Message, peer_ip: str, conn: MllpConnection
     ) -> None:
-        await _handle_worklist_query(care, msg, peer_ip, conn)
+        await _handle_worklist_query(care, store, msg, peer_ip, conn)
 
     oru_server = await start_oru_server(
         "0.0.0.0", config.oru_port, connections, care.forward_result, store,
