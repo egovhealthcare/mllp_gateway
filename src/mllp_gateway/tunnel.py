@@ -13,6 +13,8 @@ import threading
 import urllib.request
 from pathlib import Path
 
+from mllp_gateway.ssl_context import get_ssl_context
+
 __all__ = ["start_tunnel", "stop_tunnel"]
 
 logger = logging.getLogger("mllp_gateway.tunnel")
@@ -87,7 +89,7 @@ def _download_cloudflared(dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     logger.info("Downloading cloudflared from %s", url)
 
-    with urllib.request.urlopen(url, timeout=120) as resp:
+    with urllib.request.urlopen(url, timeout=120, context=get_ssl_context()) as resp:
         data = resp.read()
 
     if url.endswith(".tgz"):

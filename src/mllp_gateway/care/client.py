@@ -5,6 +5,7 @@ from typing import Any
 import aiohttp
 
 from mllp_gateway.care.auth import Auth
+from mllp_gateway.ssl_context import aiohttp_connector
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,7 @@ class CareClient:
         self._session = aiohttp.ClientSession(
             base_url=self._base_url,
             timeout=aiohttp.ClientTimeout(total=self._timeout),
+            connector=aiohttp_connector(),
         )
 
     async def close(self) -> None:

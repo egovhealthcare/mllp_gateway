@@ -19,6 +19,7 @@ import aiohttp
 
 from mllp_gateway import __version__
 from mllp_gateway.process import is_frozen, restart_process
+from mllp_gateway.ssl_context import aiohttp_connector
 
 if TYPE_CHECKING:
     from mllp_gateway.config import Config
@@ -109,7 +110,7 @@ async def check_for_update(config: Config) -> UpdateInfo | None:
         url = f"https://api.github.com/repos/{repo}/releases/latest"
 
     try:
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(connector=aiohttp_connector()) as session:
             async with session.get(
                 url,
                 headers={"Accept": "application/vnd.github+json"},
@@ -182,7 +183,7 @@ async def download_and_apply(info: UpdateInfo) -> bool:
     tmp = Path(tmp_path)
 
     try:
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(connector=aiohttp_connector()) as session:
             async with session.get(
                 info.download_url, timeout=aiohttp.ClientTimeout(total=300)
             ) as resp:

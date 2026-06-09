@@ -1,8 +1,15 @@
 #!/usr/bin/env python
 import sys
-from PyInstaller.utils.hooks import collect_all, collect_dynamic_libs, collect_submodules
+from PyInstaller.utils.hooks import (
+    collect_all,
+    collect_data_files,
+    collect_dynamic_libs,
+    collect_submodules,
+)
 
 datas, binaries, hiddenimports = collect_all("mllp_gateway")
+datas += collect_data_files("certifi")
+hiddenimports += collect_submodules("certifi")
 
 # Native extensions: submodules + shared libs (collect_all pulls in bloat)
 for pkg in ["aiohttp", "multidict", "yarl", "frozenlist", "cryptography", "PIL"]:

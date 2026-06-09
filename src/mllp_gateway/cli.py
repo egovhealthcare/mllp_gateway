@@ -12,6 +12,7 @@ from mllp_gateway.config import (
     load_config,
     run_configure,
 )
+from mllp_gateway.ssl_context import configure_ssl_environment
 
 __all__ = ["entrypoint"]
 from mllp_gateway.gateway import run as run_gateway
@@ -95,6 +96,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def entrypoint() -> None:
     """Main CLI entry point, dispatching to subcommands or the default
     double-click flow (auto-update → ensure service is installed)."""
+    configure_ssl_environment()
     parser = _build_parser()
     args = parser.parse_args()
 

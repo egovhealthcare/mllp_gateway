@@ -15,6 +15,8 @@ from joserfc import jwt
 from joserfc.errors import BadSignatureError, DecodeError
 from joserfc.jwk import RSAKey
 
+from mllp_gateway.ssl_context import get_ssl_context
+
 logger = logging.getLogger(__name__)
 
 
@@ -57,7 +59,9 @@ class Auth:
         try:
             req = urllib.request.Request(url, method="GET")
             req.add_header("Accept", "application/json")
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with urllib.request.urlopen(
+                req, timeout=10, context=get_ssl_context()
+            ) as resp:
                 data = json.loads(resp.read())
         except (urllib.error.URLError, OSError) as exc:
             raise RuntimeError(f"Failed to fetch CARE public key from {url}") from exc
