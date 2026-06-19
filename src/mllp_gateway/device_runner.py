@@ -8,8 +8,10 @@ long-running task per device:
   ORU session over an MLLP-framed serial link.
 - **serial + astm** — the gateway opens the serial port and runs an ASTM
   E1381 session.
-- **ethernet + astm** — the gateway connects out to the analyzer's TCP port
-  and runs an ASTM E1381 session.
+- **ethernet + astm (outbound)** — the gateway connects out to the analyzer's
+  TCP port and runs an ASTM E1381 session.
+- **ethernet + astm (inbound)** — served by a dedicated ASTM TCP listener
+  (e.g. Sysmex XP-300 on port 5006).
 
 Every runner reconnects with backoff until the stop event is set.
 """
@@ -18,11 +20,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
 from functools import partial
 
 from mllp_gateway.astm import ASTMSession
 from mllp_gateway.astm import codec as astm_codec
+from mllp_gateway.astm.handler import handle_astm_message
 from mllp_gateway.care import CareClient
 from mllp_gateway.connection_manager import ConnectionManager
 from mllp_gateway.message_store import MessageStore
@@ -68,6 +70,8 @@ def run_configured_devices(
     for device in devices:
         if device.transport == "ethernet" and device.protocol == "hl7" and not device.is_outbound_hl7:
             continue  # served by the shared MLLP TCP listeners
+        if device.is_inbound_astm:
+            continue  # served by dedicated inbound ASTM listeners
         tasks.append(
             asyncio.create_task(
                 _run_device(
@@ -215,17 +219,9 @@ async def _run_astm(
     conn = MllpConnection(reader, writer)
     connections.register_oru(device.connection_key, conn)
     try:
-        while not stop_event.is_set():
-            token = await session.wait_for_establishment(timeout=None)
-            if token is None:
-                return  # link closed
-            if token != astm_codec.ENQ:
-                continue
-            connections.record_activity(device.connection_key)
-            records = await session.receive_message()
-            if not records:
-                continue
-            await _handle_astm_message(device, records, session, care, store)
+        await serve_astm_session(
+            device, session, connections, care, store, stop_event
+        )
     finally:
         connections.unregister_oru(device.connection_key)
         writer.close()
@@ -235,97 +231,61 @@ async def _run_astm(
             pass
 
 
-def _is_astm_query(records: list[str]) -> bool:
-    """True if the message is a host-query request (contains a ``Q`` record)."""
-    return any(astm_codec.record_type(line) == "Q" for line in records)
-
-
-def _extract_astm_sample_ids(records: list[str]) -> list[str]:
-    """Pull sample/specimen IDs from ``Q`` query records.
-
-    ASTM Q records carry the requested sample range in field 3
-    (``starting range ID``), e.g. ``Q|1|^SAMPLE001||ALL||...``.
-    """
-    sample_ids: list[str] = []
-    for line in records:
-        if astm_codec.record_type(line) != "Q":
-            continue
-        fields = astm_codec.split_fields(line)
-        if len(fields) > 2 and fields[2]:
-            # Strip leading component delimiters (e.g. "^SAMPLE001").
-            sample_ids.append(fields[2].lstrip("^").split("^")[0])
-    return [s for s in sample_ids if s]
-
-
-async def _handle_astm_message(
+async def serve_astm_session(
     device: DeviceConfig,
-    records: list[str],
     session: ASTMSession,
+    connections: ConnectionManager,
     care: CareClient,
     store: MessageStore,
+    stop_event: asyncio.Event,
 ) -> None:
-    raw = "\n".join(records)
-    now = datetime.now(timezone.utc).isoformat()
-
-    if _is_astm_query(records):
-        sample_ids = _extract_astm_sample_ids(records)
-        await store.insert(
-            "received",
-            message=raw,
-            ack="",
-            peer=device.connection_key,
-            time=now,
-            forwarded=1,
-        )
-        try:
-            result = await care.fetch_pending_orders(
-                device.connection_key,
-                sample_ids,
-                raw_message=raw,
-                sender_device_id=device.id,
-            )
-        except Exception as e:
-            logger.error("ASTM pending-orders fetch failed for %s: %s", device.id, e)
+    """Process ASTM messages on an established link until closed or stopped."""
+    while not stop_event.is_set():
+        token = await session.wait_for_establishment(timeout=None)
+        if token is None:
             return
-        response_text = result.get("raw_astm_response") or result.get("raw_response")
-        if response_text:
-            order_records = [
-                line for line in response_text.replace("\r", "\n").split("\n") if line
-            ]
-            ok = await session.send_message(order_records)
-            await store.insert(
-                "sent",
-                message=response_text.replace("\r", "\n"),
-                status="success" if ok else "error",
-                peer=device.connection_key,
-                host=device.connection_key,
-                time=now,
-            )
-            logger.info(
-                "[DEVICE -->] Sent ASTM worklist (%d records) to %s (ok=%s)",
-                len(order_records),
-                device.connection_key,
-                ok,
-            )
-        return
+        if token != astm_codec.ENQ:
+            continue
+        connections.record_activity(device.connection_key)
+        records = await session.receive_message()
+        if not records:
+            continue
+        await handle_astm_message(device, records, session, care, store)
 
-    # Result message — store and forward to CARE.
-    row = await store.insert(
-        "received",
-        message=raw,
-        ack="",
-        peer=device.connection_key,
-        time=now,
-    )
-    try:
-        await care.forward_result(
-            raw, device.connection_key, sender_device_id=device.id
+
+def run_inbound_astm_servers(
+    devices: list[DeviceConfig],
+    connections: ConnectionManager,
+    care: CareClient,
+    store: MessageStore,
+    stop_event: asyncio.Event,
+) -> list[asyncio.Task]:
+    """Spawn inbound ASTM listener tasks for configured devices."""
+    from mllp_gateway.astm.server import run_inbound_astm_listener
+
+    tasks: list[asyncio.Task] = []
+    for device in devices:
+        if not device.is_inbound_astm:
+            continue
+        tasks.append(
+            asyncio.create_task(
+                run_inbound_astm_listener(
+                    device,
+                    "0.0.0.0",
+                    device.oru_port,
+                    connections,
+                    care,
+                    store,
+                    stop_event,
+                ),
+                name=f"astm-inbound-{device.id}",
+            )
         )
-        await store.update_forward_status(row["id"], True)
-        logger.info("Forwarded ASTM result from %s", device.connection_key)
-    except Exception as e:
-        logger.error(
-            "Failed to forward ASTM result from %s: %s (will retry)",
-            device.connection_key,
-            e,
+        logger.info(
+            "Starting inbound ASTM listener for %s on port %d",
+            device.registered_name or device.id,
+            device.oru_port,
         )
+    return tasks
+
+

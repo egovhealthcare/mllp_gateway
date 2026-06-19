@@ -22,10 +22,12 @@ logger = logging.getLogger(__name__)
 Transport = Literal["ethernet", "serial"]
 Protocol = Literal["hl7", "astm"]
 Hl7ConnectionMode = Literal["inbound", "outbound"]
+AstmConnectionMode = Literal["inbound", "outbound"]
 
 _VALID_TRANSPORTS: frozenset[str] = frozenset({"ethernet", "serial"})
 _VALID_PROTOCOLS: frozenset[str] = frozenset({"hl7", "astm"})
 _VALID_HL7_CONNECTION_MODES: frozenset[str] = frozenset({"inbound", "outbound"})
+_VALID_ASTM_CONNECTION_MODES: frozenset[str] = frozenset({"inbound", "outbound"})
 
 # pyserial parity/stopbit string constants accepted from CARE config.
 _PARITY_MAP = {"N": "N", "E": "E", "O": "O", "M": "M", "S": "S"}
@@ -77,6 +79,7 @@ class DeviceConfig:
     orm_port: int | None = None
     orm_mode: str = "shared"
     hl7_connection_mode: Hl7ConnectionMode = "inbound"
+    astm_connection_mode: AstmConnectionMode = "outbound"
     # Serial fields
     serial: SerialSettings | None = None
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
@@ -105,6 +108,15 @@ class DeviceConfig:
             and self.hl7_connection_mode == "outbound"
         )
 
+    @property
+    def is_inbound_astm(self) -> bool:
+        """True when the analyzer connects to a gateway ASTM listener."""
+        return (
+            self.transport == "ethernet"
+            and self.protocol == "astm"
+            and self.astm_connection_mode == "inbound"
+        )
+
 
 def _coerce_transport(value: Any) -> Transport:
     text = str(value or "ethernet").lower()
@@ -128,6 +140,14 @@ def _coerce_hl7_connection_mode(value: Any) -> Hl7ConnectionMode:
         logger.warning("Unknown hl7_connection_mode %r, defaulting to 'inbound'", value)
         return "inbound"
     return cast(Hl7ConnectionMode, text)
+
+
+def _coerce_astm_connection_mode(value: Any) -> AstmConnectionMode:
+    text = str(value or "outbound").lower()
+    if text not in _VALID_ASTM_CONNECTION_MODES:
+        logger.warning("Unknown astm_connection_mode %r, defaulting to 'outbound'", value)
+        return "outbound"
+    return cast(AstmConnectionMode, text)
 
 
 def _parse_serial(raw: dict[str, Any]) -> SerialSettings | None:
@@ -167,6 +187,7 @@ def parse_device_config(raw: dict[str, Any]) -> DeviceConfig:
     oru_port_raw = raw.get("oru_port")
     oru_port = int(oru_port_raw if oru_port_raw is not None else 2575)
     hl7_connection_mode = _coerce_hl7_connection_mode(raw.get("hl7_connection_mode"))
+    astm_connection_mode = _coerce_astm_connection_mode(raw.get("astm_connection_mode"))
     return DeviceConfig(
         id=str(raw.get("id", "")),
         registered_name=str(raw.get("registered_name", "")),
@@ -178,6 +199,7 @@ def parse_device_config(raw: dict[str, Any]) -> DeviceConfig:
         orm_port=int(orm_port) if orm_port else None,
         orm_mode=str(raw.get("orm_mode", "shared")),
         hl7_connection_mode=hl7_connection_mode,
+        astm_connection_mode=astm_connection_mode,
         serial=_parse_serial(raw) if transport == "serial" else None,
         raw=raw,
     )

@@ -94,6 +94,23 @@ class TestDeviceConfigParsing(unittest.TestCase):
         self.assertEqual(cfg.hl7_connection_mode, "outbound")
         self.assertTrue(cfg.is_outbound_hl7)
 
+    def test_sysmex_xp_300_inbound_astm_from_care_payload(self):
+        cfg = parse_device_config(
+            {
+                "id": "d-sysmex",
+                "type": "sysmex_xp_300",
+                "protocol": "astm",
+                "endpoint_address": "192.168.2.5",
+                "oru_port": 5006,
+                "astm_connection_mode": "inbound",
+            }
+        )
+        self.assertEqual(cfg.protocol, "astm")
+        self.assertEqual(cfg.astm_connection_mode, "inbound")
+        self.assertEqual(cfg.oru_port, 5006)
+        self.assertTrue(cfg.is_inbound_astm)
+        self.assertFalse(cfg.is_outbound_hl7)
+
 
 if __name__ == "__main__":
     unittest.main()

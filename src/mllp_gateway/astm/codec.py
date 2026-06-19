@@ -57,6 +57,48 @@ def build_frame(record_text: str, frame_number: int, *, last: bool = True) -> by
     return STX + body + checksum + CRLF
 
 
+def _is_hex_byte(value: int) -> bool:
+    return (0x30 <= value <= 0x39) or (0x41 <= value <= 0x46) or (0x61 <= value <= 0x66)
+
+
+def try_extract_frame(buffer: bytes) -> tuple[bytes, bytes] | None:
+    """Return ``(frame, remainder)`` when *buffer* holds one complete ASTM frame.
+
+    Frames end with ``ETX`` or ``ETB`` and a 2-byte hex checksum, optionally
+    followed by ``CR``/``LF``. Record text may contain embedded ``CR`` bytes
+    before the terminator (Sysmex XP-300 sends ``<text>CR ETX``). Some devices
+    omit the trailing ``CR`` or send back-to-back frames with no separator.
+    """
+    if not buffer.startswith(STX):
+        return None
+
+    data = buffer[1:]
+    for index in range(len(data)):
+        byte = data[index]
+        if byte not in (ETX[0], ETB[0]):
+            continue
+        trailer = data[index + 1 :]
+        if len(trailer) < 2:
+            continue
+        if not (_is_hex_byte(trailer[0]) and _is_hex_byte(trailer[1])):
+            continue
+        # STX (1) + data[:index] + ETX (1) + checksum (2)
+        frame_end = index + 4
+        if len(trailer) >= 3 and trailer[2] == CR[0]:
+            frame_end += 1
+            if len(trailer) >= 4 and trailer[3] == LF[0]:
+                frame_end += 1
+        elif len(trailer) >= 2 and (
+            len(trailer) == 2
+            or buffer[frame_end : frame_end + 1] in (STX, ENQ, EOT)
+        ):
+            pass
+        else:
+            continue
+        return buffer[:frame_end], buffer[frame_end:]
+    return None
+
+
 def parse_frame(frame: bytes) -> tuple[int, str, bool, bool]:
     """Parse a raw frame (``STX`` … ``CR LF``) into its components.
 
@@ -101,7 +143,7 @@ def parse_frame(frame: bytes) -> tuple[int, str, bool, bool]:
     except ValueError as exc:
         raise ValueError(f"Invalid ASTM frame number {fn_byte!r}") from exc
 
-    record_text = body[1:-1].decode("ascii", errors="replace")
+    record_text = body[1:-1].decode("ascii", errors="replace").rstrip("\r")
     expected = make_checksum(body)
     checksum_ok = checksum_field.upper() == expected
     return frame_number, record_text, is_last, checksum_ok

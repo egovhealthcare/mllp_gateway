@@ -21,7 +21,7 @@ __all__ = ["run"]
 from mllp_gateway.care import CareClient, create_app
 from mllp_gateway.config import CONFIG_FILE, Config
 from mllp_gateway.connection_manager import ConnectionManager
-from mllp_gateway.device_runner import run_configured_devices
+from mllp_gateway.device_runner import run_configured_devices, run_inbound_astm_servers
 from mllp_gateway.message_store import MessageStore
 from mllp_gateway.mllp import start_orm_server, start_oru_server
 from mllp_gateway.mllp.framing import MllpConnection
@@ -303,6 +303,7 @@ async def run_gateway(
         await asyncio.sleep(3)  # Give tunnel time to register with Cloudflare
 
     device_tasks: list[asyncio.Task] = []
+    astm_server_tasks: list[asyncio.Task] = []
 
     async def _fetch_and_apply_devices(label: str = "") -> int:
         """Fetch configured devices from CARE, register them, and start runners.
@@ -318,6 +319,11 @@ async def run_gateway(
             run_configured_devices(
                 device_configs, connections, care, store,
                 worklist_handler, stop_event,
+            )
+        )
+        astm_server_tasks.extend(
+            run_inbound_astm_servers(
+                device_configs, connections, care, store, stop_event
             )
         )
         logger.info("Loaded %d configured devices from CARE%s", len(device_configs), f" ({label})" if label else "")
@@ -401,6 +407,8 @@ async def run_gateway(
     for t in tasks:
         t.cancel()
     for t in device_tasks:
+        t.cancel()
+    for t in astm_server_tasks:
         t.cancel()
     await care.close()
     await runner.cleanup()

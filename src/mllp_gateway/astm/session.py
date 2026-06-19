@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 RECEIVE_TIMEOUT = 30.0  # waiting for a frame after ACKing
 REPLY_TIMEOUT = 15.0  # waiting for ACK/NAK after sending a frame
 MAX_NAK_RETRIES = 6
+MAX_FRAME_BYTES = 64 * 1024
 
 
 class ASTMSession:
@@ -48,8 +49,16 @@ class ASTMSession:
         self._reader = reader
         self._writer = writer
         self.peer_id = peer_id
+        self._recv_buffer = b""
 
     # -- low-level IO --------------------------------------------------
+
+    async def _read_byte(self, timeout: float) -> bytes:
+        if self._recv_buffer:
+            byte = self._recv_buffer[:1]
+            self._recv_buffer = self._recv_buffer[1:]
+            return byte
+        return await asyncio.wait_for(self._reader.readexactly(1), timeout)
 
     async def _read_token(self, timeout: float) -> tuple[str, bytes]:
         """Read the next control byte or full frame.
@@ -59,22 +68,35 @@ class ASTMSession:
         bytes between tokens are skipped.
         """
         while True:
-            byte = await asyncio.wait_for(self._reader.readexactly(1), timeout)
+            byte = await self._read_byte(timeout)
             if byte in (codec.CR, codec.LF, b"\x00"):
                 continue
             if byte in (ENQ, ACK, NAK, EOT):
                 return "control", byte
             if byte == STX:
-                rest = await asyncio.wait_for(
-                    self._reader.readuntil(CR), timeout
-                )
-                return "frame", STX + rest
+                return "frame", await self._read_frame_after_stx(timeout)
             # Unexpected byte — log and keep scanning.
             logger.debug("[%s] skipping unexpected ASTM byte %r", self.peer_id, byte)
 
     async def _send(self, data: bytes) -> None:
         self._writer.write(data)
         await self._writer.drain()
+
+    async def _read_frame_after_stx(self, timeout: float) -> bytes:
+        """Read a complete ASTM frame after the leading ``STX`` byte."""
+        buffer = STX
+        while True:
+            extracted = codec.try_extract_frame(buffer)
+            if extracted is not None:
+                frame, remainder = extracted
+                self._recv_buffer = remainder + self._recv_buffer
+                return frame
+            if len(buffer) >= MAX_FRAME_BYTES:
+                raise ValueError("ASTM frame exceeds maximum size")
+            chunk = await asyncio.wait_for(self._reader.read(1), timeout)
+            if not chunk:
+                raise asyncio.IncompleteReadError(buffer, len(buffer) + 1)
+            buffer += chunk
 
     # -- receiving (gateway as receiver) -------------------------------
 
@@ -84,55 +106,76 @@ class ASTMSession:
         Assumes the establishment ``ENQ`` has just been read. ACKs it, then
         receives and acknowledges frames until ``EOT``. Returns the list of
         record lines, or ``None`` if the peer aborted before sending data.
+
+        Analyzers such as the Sysmex XP-300 require an ``ACK`` immediately on
+        each frame before any host processing; they do not tolerate ``NAK``.
         """
         await self._send(ACK)
         records: list[str] = []
-        expected_frame = 1
         partial = ""
+        pending = self._recv_buffer
+        self._recv_buffer = b""
 
         while True:
-            try:
-                kind, token = await self._read_token(RECEIVE_TIMEOUT)
-            except asyncio.TimeoutError:
-                logger.warning("[%s] ASTM receive timed out", self.peer_id)
+            if not pending:
+                try:
+                    chunk = await asyncio.wait_for(
+                        self._reader.read(4096), RECEIVE_TIMEOUT
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning("[%s] ASTM receive timed out", self.peer_id)
+                    return records or None
+                if not chunk:
+                    return records or None
+                pending += chunk
+
+            if pending.startswith(ENQ):
+                await self._send(ACK)
+                pending = pending[1:]
+                continue
+
+            if pending.startswith(EOT):
+                if partial:
+                    records.append(partial)
                 return records or None
 
-            if kind == "control":
-                if token == EOT:
-                    if partial:
-                        records.append(partial)
-                    return records or None
-                if token == ENQ:
-                    # Peer restarting establishment — re-ACK.
-                    await self._send(ACK)
-                    continue
-                # ACK/NAK out of context — ignore.
+            if pending[:1] in (codec.CR, codec.LF, b"\x00"):
+                pending = pending[1:]
                 continue
+
+            if not pending.startswith(STX):
+                logger.debug(
+                    "[%s] skipping unexpected ASTM byte %r",
+                    self.peer_id,
+                    pending[:1],
+                )
+                pending = pending[1:]
+                continue
+
+            extracted = codec.try_extract_frame(pending)
+            if extracted is None:
+                if len(pending) >= MAX_FRAME_BYTES:
+                    logger.warning("[%s] ASTM frame exceeds maximum size", self.peer_id)
+                    pending = pending[1:]
+                    continue
+                continue
+
+            frame, pending = extracted
+            await self._send(ACK)
 
             try:
-                frame_number, text, is_last, checksum_ok = codec.parse_frame(token)
+                _frame_number, text, is_last, checksum_ok = codec.parse_frame(frame)
             except ValueError as exc:
-                logger.warning("[%s] malformed ASTM frame: %s", self.peer_id, exc)
-                await self._send(NAK)
+                logger.warning("[%s] ASTM frame parse error: %s", self.peer_id, exc)
                 continue
 
-            if not checksum_ok or frame_number != (expected_frame % 8):
-                logger.warning(
-                    "[%s] ASTM frame rejected (checksum_ok=%s, fn=%s, expected=%s)",
-                    self.peer_id,
-                    checksum_ok,
-                    frame_number,
-                    expected_frame % 8,
-                )
-                await self._send(NAK)
-                continue
+            if not checksum_ok:
+                logger.warning("[%s] ASTM frame checksum mismatch", self.peer_id)
 
             partial += text
             if is_last:
                 records.append(partial)
                 partial = ""
-            expected_frame += 1
-            await self._send(ACK)
 
     # -- sending (gateway as sender) -----------------------------------
 
@@ -203,5 +246,5 @@ class ASTMSession:
                 return None
             if kind == "control":
                 return token
-            # Stray frame outside a session — NAK and keep waiting.
-            await self._send(NAK)
+            # Stray frame before ENQ — ACK so strict analyzers do not time out.
+            await self._send(ACK)

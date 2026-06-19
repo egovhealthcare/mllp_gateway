@@ -17,6 +17,43 @@ def test_frame_round_trip():
     assert checksum_ok is True
 
 
+def build_xp300_style_frame(record: str, frame_number: int) -> bytes:
+    """XP-300 embeds CR before ETX inside the frame body."""
+    fn = str(frame_number % codec.FRAME_NUMBER_MODULO).encode("ascii")
+    body = fn + record.encode("ascii") + codec.CR + codec.ETX
+    checksum = codec.make_checksum(body)
+    return codec.STX + body + checksum + codec.CRLF
+
+
+def test_parse_xp300_style_frame_with_embedded_cr():
+    record = r"H|\^&|||XP-300^00-16^^^^C2524^AK007119||||||||E1394-97"
+    frame = build_xp300_style_frame(record, 1)
+    extracted, remainder = codec.try_extract_frame(frame)
+    assert extracted == frame
+    assert remainder == b""
+    frame_number, text, is_last, checksum_ok = codec.parse_frame(frame)
+    assert frame_number == 1
+    assert text == record
+    assert is_last is True
+    assert checksum_ok is True
+
+
+def test_try_extract_frame_leaves_remainder():
+    frame = build_xp300_style_frame("P|1", 2)
+    extracted, remainder = codec.try_extract_frame(frame + codec.ENQ)
+    assert extracted == frame
+    assert remainder == codec.ENQ
+
+
+def test_try_extract_frame_back_to_back_without_crlf():
+    frame_a = build_xp300_style_frame("P|1", 1)[:-2]  # drop CR LF
+    frame_b = build_xp300_style_frame("L|1|N", 2)
+    buffer = frame_a + frame_b
+    extracted, remainder = codec.try_extract_frame(buffer)
+    assert extracted == frame_a
+    assert remainder == frame_b
+
+
 def test_checksum_is_uppercase_hex():
     body = b"1" + b"P|1" + codec.ETX
     assert codec.make_checksum(body) == b"31"
@@ -53,6 +90,40 @@ async def _connected_pair():
     r1, w1 = await asyncio.open_connection(sock=s1)
     r2, w2 = await asyncio.open_connection(sock=s2)
     return (r1, w1), (r2, w2)
+
+
+async def test_session_receives_xp300_style_frames():
+    (r1, w1), (r2, w2) = await _connected_pair()
+    receiver = ASTMSession(r2, w2, "receiver")
+    records = [
+        r"H|\^&|||XP-300^00-16|||||||E1394-97",
+        "P|1",
+        "L|1|N",
+    ]
+
+    async def receive():
+        token = await receiver.wait_for_establishment(timeout=5)
+        assert token == codec.ENQ
+        return await receiver.receive_message()
+
+    recv_task = asyncio.create_task(receive())
+    w1.write(codec.ENQ)
+    await w1.drain()
+    ack = await r1.readexactly(1)
+    assert ack == codec.ACK
+    for index, record in enumerate(records, start=1):
+        frame = build_xp300_style_frame(record, index)
+        w1.write(frame)
+        await w1.drain()
+        ack = await r1.readexactly(1)
+        assert ack == codec.ACK
+    w1.write(codec.EOT)
+    await w1.drain()
+
+    got = await recv_task
+    assert got == records
+    w1.close()
+    w2.close()
 
 
 async def test_session_round_trip():
