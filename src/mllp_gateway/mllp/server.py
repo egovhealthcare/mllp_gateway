@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import datetime, timezone
 
 import hl7
@@ -32,6 +32,29 @@ def _get_message_type(msg: hl7.Message) -> str:
         return str(msg.segment("MSH")(9))
     except (IndexError, KeyError):
         return ""
+
+
+async def _read_messages(
+    conn: MllpConnection, peer_id: str
+) -> AsyncIterator[hl7.Message]:
+    """Yield HL7 messages from *conn* until the link closes.
+
+    Read-level errors are handled here so callers can simply iterate:
+    an oversized frame is skipped, while EOF and fatal socket errors
+    (e.g. WinError 1236 on connection abort) stop iteration cleanly.
+    """
+    while not conn.at_eof:
+        try:
+            msg = await conn.read_message()
+        except asyncio.LimitOverrunError:
+            logger.warning("MLLP frame exceeded buffer limit from %s", peer_id)
+            continue
+        except asyncio.IncompleteReadError:
+            return
+        except OSError as e:
+            logger.info("Connection from %s closed: %s", peer_id, e)
+            return
+        yield msg
 
 
 async def start_oru_server(
@@ -90,18 +113,7 @@ async def serve_oru_connection(
     worker = asyncio.create_task(_forward_worker(ip, queue, forward, store))
 
     try:
-        while not conn.at_eof:
-            try:
-                msg = await conn.read_message()
-            except asyncio.LimitOverrunError:
-                logger.warning("MLLP frame exceeded buffer limit from %s", ip)
-                continue
-            except asyncio.IncompleteReadError:
-                break
-            except Exception as e:
-                logger.warning("Error reading HL7 from %s: %s", ip, e)
-                continue
-
+        async for msg in _read_messages(conn, ip):
             connections.record_activity(ip)
             msg_type = _get_message_type(msg)
             logger.info("[DEVICE <--] Received %s from %s (ORU connection)", msg_type or "message", ip)
@@ -203,18 +215,7 @@ async def start_orm_server(
         queue = connections.get_orm_response_queue(ip)
 
         try:
-            while not conn.at_eof:
-                try:
-                    msg = await conn.read_message()
-                except asyncio.LimitOverrunError:
-                    logger.warning("MLLP frame exceeded buffer limit from %s", ip)
-                    continue
-                except asyncio.IncompleteReadError:
-                    break
-                except Exception as e:
-                    logger.warning("Error reading HL7 from %s: %s", ip, e)
-                    continue
-
+            async for msg in _read_messages(conn, ip):
                 connections.record_activity(ip)
 
                 msg_type = _get_message_type(msg)
