@@ -1,6 +1,6 @@
 [project]
 name = "mllp-gateway"
-version = "1.0.0"
+version = "1.1.0"
 description = "Standalone MLLP gateway for lab analyzer HL7 communication with CARE"
 readme = "README.md"
 license = "MIT"
