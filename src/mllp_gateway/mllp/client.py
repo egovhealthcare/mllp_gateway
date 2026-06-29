@@ -69,15 +69,15 @@ async def run_outbound_hl7_device(
     store: MessageStore,
     worklist_handler: WorklistHandler | None,
     stop_event: asyncio.Event,
-    reconnect_backoff_base: float = 2,
-    reconnect_backoff_max: float = 60,
+    reconnect_backoff_base: float = 10,
+    reconnect_backoff_max: float = 120,
 ) -> None:
     """Maintain a persistent outbound MLLP session with reconnect backoff."""
 
     async def forward_with_id(raw_message: str, peer: str) -> None:
         await forward(raw_message, peer, device_id)
 
-    attempt = 0
+    consecutive_failures = 0
     while not stop_event.is_set():
         try:
             await serve_outbound_hl7_connection(
@@ -89,16 +89,61 @@ async def run_outbound_hl7_device(
                 store,
                 worklist_handler=worklist_handler,
             )
-            attempt = 0
+            if consecutive_failures:
+                logger.info(
+                    "Outbound HL7 reconnected to %s:%d after %d failed attempts",
+                    host,
+                    port,
+                    consecutive_failures,
+                )
+            consecutive_failures = 0
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001
-            logger.warning("Outbound HL7 link error for %s:%d: %s", host, port, e)
+            consecutive_failures += 1
+            if consecutive_failures == 1:
+                logger.warning(
+                    "Outbound HL7 link error for %s:%d: %s", host, port, e
+                )
+            elif consecutive_failures % 10 == 0:
+                logger.warning(
+                    "Outbound HL7 still unavailable at %s:%d after %d attempts: %s",
+                    host,
+                    port,
+                    consecutive_failures,
+                    e,
+                )
+            else:
+                logger.debug(
+                    "Outbound HL7 link error for %s:%d (attempt %d): %s",
+                    host,
+                    port,
+                    consecutive_failures,
+                    e,
+                )
         if stop_event.is_set():
             return
-        attempt += 1
-        delay = min(reconnect_backoff_base * attempt, reconnect_backoff_max)
-        logger.info("Reconnecting outbound HL7 to %s:%d in %ds", host, port, delay)
+        backoff_step = max(consecutive_failures, 1)
+        delay = min(reconnect_backoff_base * backoff_step, reconnect_backoff_max)
+        if consecutive_failures == 0:
+            logger.debug(
+                "Outbound HL7 link closed for %s:%d, reconnecting in %ds",
+                host,
+                port,
+                delay,
+            )
+        elif consecutive_failures == 1:
+            logger.info(
+                "Reconnecting outbound HL7 to %s:%d in %ds", host, port, delay
+            )
+        else:
+            logger.debug(
+                "Reconnecting outbound HL7 to %s:%d in %ds (attempt %d)",
+                host,
+                port,
+                delay,
+                consecutive_failures,
+            )
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=delay)
             return

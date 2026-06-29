@@ -39,8 +39,8 @@ from mllp_gateway.transport.serial import (
 
 logger = logging.getLogger(__name__)
 
-_RECONNECT_BACKOFF_BASE = 2  # seconds
-_RECONNECT_BACKOFF_MAX = 60
+_RECONNECT_BACKOFF_BASE = 10  # seconds
+_RECONNECT_BACKOFF_MAX = 120
 
 
 async def _sleep_or_stop(stop_event: asyncio.Event, delay: float) -> bool:
