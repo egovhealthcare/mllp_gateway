@@ -118,6 +118,8 @@ def _pipe_output(stream) -> None:
             "https://" in line and ".trycloudflare.com" in line
         ) or "Registered tunnel connection" in line:
             logger.info(line)
+        elif "Failed to refresh DNS local resolver" in line:
+            logger.debug(line)
         elif "ERR" in line or "error" in line.lower():
             logger.error(line)
 
