@@ -161,7 +161,7 @@ For servers without a display (or when running as a service):
 mllp-gateway run --no-tray
 ```
 
-Logs are written to stderr and to `~/.mllp_gateway/gateway.log` (rotated at 5 MB, 3 backups). Stored messages are automatically purged after the configured retention period (default 14 days).
+Logs are written to stderr and to `~/.mllp_gateway/gateway.log` (rotated daily at midnight; retention matches `retention_days` in `config.toml`, default 14 days). Stored messages are automatically purged after the same retention period.
 
 ## Web UI
 

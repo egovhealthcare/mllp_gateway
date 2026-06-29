@@ -4,7 +4,7 @@ import argparse
 import logging
 import os
 import sys
-from logging.handlers import RotatingFileHandler
+from logging.handlers import TimedRotatingFileHandler
 
 from mllp_gateway.config import (
     APP_DIR,
@@ -33,8 +33,8 @@ from mllp_gateway.updater import (
 logger = logging.getLogger("mllp_gateway")
 
 
-def _setup_logging(*, to_file: bool = False) -> None:
-    """Configure root logger with stderr and optional rotating file output."""
+def _setup_logging(*, to_file: bool = False, retention_days: int = 14) -> None:
+    """Configure root logger with stderr and optional daily-rotating file output."""
     root = logging.getLogger()
     root.setLevel(logging.INFO)
     fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -46,7 +46,12 @@ def _setup_logging(*, to_file: bool = False) -> None:
 
     if to_file:
         APP_DIR.mkdir(parents=True, exist_ok=True)
-        h = RotatingFileHandler(LOG_FILE, maxBytes=5 * 1024 * 1024, backupCount=3)
+        h = TimedRotatingFileHandler(
+            LOG_FILE,
+            when="midnight",
+            backupCount=retention_days,
+            encoding="utf-8",
+        )
         h.setFormatter(fmt)
         root.addHandler(h)
 
@@ -125,7 +130,7 @@ def entrypoint() -> None:
             return
 
         case "run":
-            _setup_logging(to_file=True)
+            _setup_logging(to_file=True, retention_days=config.retention_days)
             logger.info(
                 "start: argv=%r frozen=%s pid=%d",
                 sys.argv,
@@ -152,7 +157,7 @@ def entrypoint() -> None:
                 parser.print_help()
                 return
 
-            _setup_logging(to_file=True)
+            _setup_logging(to_file=True, retention_days=config.retention_days)
 
             if sys.platform == "win32" and not is_admin():
                 # schtasks requires elevation to create ONLOGON triggers.
